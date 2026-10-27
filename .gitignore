@@ -27,11 +27,8 @@ __pycache__/
 *.pyo
 .pytest_cache/
 .hypothesis/
-.vercel
 
 # Zig
 .zig-cache/
 zig-out/
 
-# Node
-node_modules/

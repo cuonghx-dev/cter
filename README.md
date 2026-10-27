@@ -1,10 +1,6 @@
 <h1 align="center">cmux</h1>
 <p align="center">A Ghostty-based macOS terminal with vertical tabs and notifications for AI coding agents</p>
 
-<p align="center">
-  <img src="./docs/assets/screenshot.png" alt="cmux screenshot" width="900" />
-</p>
-
 ## Features
 
 - **Native macOS app** — Built with Swift and AppKit, not Electron. Fast startup, low memory.
