@@ -1,0 +1,1591 @@
+import AppKit
+import SwiftUI
+import ObjectiveC
+
+/// NSVisualEffectView that never intercepts mouse events. Used for background
+/// blur inside contentView where SwiftUI may reorder it above interactive content.
+private class PassthroughBlurView: NSVisualEffectView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// Plain NSView that never intercepts mouse events. Used for tint overlays.
+private class PassthroughView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// Applies NSGlassEffectView (macOS 26+) to a window, falling back to NSVisualEffectView
+enum WindowGlassEffect {
+    private static var glassViewKey: UInt8 = 0
+    private static var tintOverlayKey: UInt8 = 0
+
+    static var isAvailable: Bool {
+        NSClassFromString("NSGlassEffectView") != nil
+    }
+
+    static func apply(to window: NSWindow, tintColor: NSColor? = nil) {
+        guard let contentView = window.contentView else { return }
+
+        // Check if we already applied glass (avoid re-wrapping)
+        if let existingGlass = objc_getAssociatedObject(window, &glassViewKey) as? NSView {
+            // Already applied, just update the tint
+            updateTint(on: existingGlass, color: tintColor, window: window)
+            return
+        }
+
+        let bounds = contentView.bounds
+
+        // macOS 26+: Insert NSGlassEffectView as a background subview (never replace
+        // window.contentView — reparenting the SwiftUI hosting view causes blank content).
+        if let glassClass = NSClassFromString("NSGlassEffectView") as? NSVisualEffectView.Type {
+            let glassView = glassClass.init(frame: bounds)
+            glassView.wantsLayer = true
+            glassView.layer?.cornerRadius = 0
+            glassView.autoresizingMask = [.width, .height]
+
+            if let color = tintColor {
+                let selector = NSSelectorFromString("setTintColor:")
+                if glassView.responds(to: selector) {
+                    glassView.perform(selector, with: color)
+                }
+            }
+
+            contentView.addSubview(glassView, positioned: .below, relativeTo: contentView.subviews.first)
+
+            objc_setAssociatedObject(window, &glassViewKey, glassView, .OBJC_ASSOCIATION_RETAIN)
+            return
+        }
+
+        // Older macOS: insert blur and tint inside contentView with a deeply
+        // negative zPosition so they always render behind SwiftUI content even
+        // if SwiftUI reorders the subview list. PassthroughBlurView overrides
+        // hitTest to avoid intercepting mouse events when SwiftUI moves it to
+        // a higher subview index.
+        let blurView = PassthroughBlurView(frame: bounds)
+        blurView.blendingMode = .behindWindow
+        blurView.material = .hudWindow
+        blurView.state = .active
+        blurView.wantsLayer = true
+        blurView.autoresizingMask = [.width, .height]
+        blurView.layer?.zPosition = -1000
+
+        // macOS 14 (Sonoma) changed clipsToBounds default from YES to NO.
+        // Explicitly restore clipping to prevent blur/tint from rendering
+        // beyond contentView bounds and interfering with titlebar compositing.
+        if #available(macOS 14, *) {
+            blurView.clipsToBounds = true
+            contentView.clipsToBounds = true
+        }
+
+        contentView.addSubview(blurView, positioned: .below, relativeTo: contentView.subviews.first)
+
+        // Tint overlay on top of blur, still behind content
+        if let color = tintColor {
+            let tintOverlay = PassthroughView(frame: bounds)
+            tintOverlay.autoresizingMask = [.width, .height]
+            tintOverlay.wantsLayer = true
+            tintOverlay.layer?.backgroundColor = color.cgColor
+            tintOverlay.layer?.zPosition = -999
+            if #available(macOS 14, *) {
+                tintOverlay.clipsToBounds = true
+            }
+            contentView.addSubview(tintOverlay, positioned: .above, relativeTo: blurView)
+            objc_setAssociatedObject(window, &tintOverlayKey, tintOverlay, .OBJC_ASSOCIATION_RETAIN)
+        }
+
+        objc_setAssociatedObject(window, &glassViewKey, blurView, .OBJC_ASSOCIATION_RETAIN)
+    }
+
+    /// Update the tint color on an existing glass effect
+    static func updateTint(to window: NSWindow, color: NSColor?) {
+        guard let glassView = objc_getAssociatedObject(window, &glassViewKey) as? NSView else { return }
+        updateTint(on: glassView, color: color, window: window)
+    }
+
+    private static func updateTint(on glassView: NSView, color: NSColor?, window: NSWindow) {
+        // For NSGlassEffectView, use setTintColor:
+        if glassView.className == "NSGlassEffectView" {
+            let selector = NSSelectorFromString("setTintColor:")
+            if glassView.responds(to: selector) {
+                glassView.perform(selector, with: color)
+            }
+        } else {
+            // For NSVisualEffectView fallback, update the tint overlay
+            if let tintOverlay = objc_getAssociatedObject(window, &tintOverlayKey) as? NSView {
+                tintOverlay.layer?.backgroundColor = color?.cgColor
+            }
+        }
+    }
+
+    static func remove(from window: NSWindow) {
+        // Note: Removing would require restoring original contentView structure
+        // For now, just clear the reference
+        objc_setAssociatedObject(window, &glassViewKey, nil, .OBJC_ASSOCIATION_RETAIN)
+        objc_setAssociatedObject(window, &tintOverlayKey, nil, .OBJC_ASSOCIATION_RETAIN)
+    }
+}
+
+final class SidebarState: ObservableObject {
+    static let didToggleNotification = Notification.Name("SidebarStateDidToggle")
+    @Published var isVisible: Bool = true
+
+    func toggle() {
+        isVisible.toggle()
+        NotificationCenter.default.post(name: Self.didToggleNotification, object: nil)
+    }
+}
+
+struct ContentView: View {
+    @EnvironmentObject var tabManager: TabManager
+    @EnvironmentObject var notificationStore: TerminalNotificationStore
+    @EnvironmentObject var sidebarState: SidebarState
+    @State private var sidebarWidth: CGFloat = 200
+    @State private var sidebarMinX: CGFloat = 0
+    @State private var isResizerHovering = false
+    @State private var isResizerDragging = false
+    private let sidebarHandleWidth: CGFloat = 6
+    @State private var sidebarSelection: SidebarSelection = .tabs
+    @State private var selectedTabIds: Set<UUID> = []
+    @State private var lastSidebarSelectionIndex: Int? = nil
+    @State private var titlebarText: String = ""
+
+    private var sidebarView: some View {
+        VerticalTabsSidebar(
+            selection: $sidebarSelection,
+            selectedTabIds: $selectedTabIds,
+            lastSidebarSelectionIndex: $lastSidebarSelectionIndex
+        )
+        .frame(width: sidebarWidth)
+        .background(GeometryReader { proxy in
+            Color.clear
+                .preference(key: SidebarFramePreferenceKey.self, value: proxy.frame(in: .global))
+        })
+        .overlay(alignment: .trailing) {
+            Color.clear
+                .frame(width: sidebarHandleWidth)
+                .contentShape(Rectangle())
+                .accessibilityIdentifier("SidebarResizer")
+                .onHover { hovering in
+                    if hovering {
+                        if !isResizerHovering {
+                            NSCursor.resizeLeftRight.push()
+                            isResizerHovering = true
+                        }
+                    } else if isResizerHovering {
+                        if !isResizerDragging {
+                            NSCursor.pop()
+                            isResizerHovering = false
+                        }
+                    }
+                }
+                .onDisappear {
+                    if isResizerHovering || isResizerDragging {
+                        NSCursor.pop()
+                        isResizerHovering = false
+                        isResizerDragging = false
+                    }
+                }
+                .gesture(
+                    DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                        .onChanged { value in
+                            if !isResizerDragging {
+                                isResizerDragging = true
+                                if !isResizerHovering {
+                                    NSCursor.resizeLeftRight.push()
+                                    isResizerHovering = true
+                                }
+                            }
+                            // Allow a wider sidebar so long paths and metadata aren't constantly truncated.
+                            let nextWidth = max(186, min(640, value.location.x - sidebarMinX + sidebarHandleWidth / 2))
+                            withTransaction(Transaction(animation: nil)) {
+                                sidebarWidth = nextWidth
+                            }
+                        }
+                        .onEnded { _ in
+                            if isResizerDragging {
+                                isResizerDragging = false
+                                if !isResizerHovering {
+                                    NSCursor.pop()
+                                }
+                            }
+                        }
+                )
+        }
+    }
+
+    /// Space at top of content area for titlebar
+    private let titlebarPadding: CGFloat = 28
+
+    private var terminalContent: some View {
+        ZStack {
+            ZStack {
+                ForEach(tabManager.tabs) { tab in
+                    let isActive = tabManager.selectedTabId == tab.id
+                    TerminalSplitTreeView(tab: tab, isTabActive: isActive)
+                        .opacity(isActive ? 1 : 0)
+                        .allowsHitTesting(isActive)
+                }
+            }
+            .opacity(sidebarSelection == .tabs ? 1 : 0)
+            .allowsHitTesting(sidebarSelection == .tabs)
+
+            NotificationsPage(selection: $sidebarSelection)
+                .opacity(sidebarSelection == .notifications ? 1 : 0)
+                .allowsHitTesting(sidebarSelection == .notifications)
+        }
+        .padding(.top, titlebarPadding)
+        .overlay(alignment: .top) {
+            // Titlebar with background - only over terminal content, not sidebar
+            customTitlebar
+                .background(Color(nsColor: GhosttyApp.shared.defaultBackgroundColor))
+        }
+    }
+
+    @AppStorage("sidebarBlendMode") private var sidebarBlendMode = SidebarBlendModeOption.behindWindow.rawValue
+
+    // Background glass settings
+    @AppStorage("bgGlassTintHex") private var bgGlassTintHex = "#000000"
+    @AppStorage("bgGlassTintOpacity") private var bgGlassTintOpacity = 0.05
+    @AppStorage("bgGlassEnabled") private var bgGlassEnabled = true
+
+    @State private var titlebarLeadingInset: CGFloat = 12
+
+    private var customTitlebar: some View {
+        HStack(spacing: 8) {
+            // Draggable folder icon + focused command name
+            if let directory = focusedDirectory {
+                DraggableFolderIcon(directory: directory)
+            }
+
+            Text(titlebarText)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+
+            Spacer()
+        }
+        .frame(height: 28)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 2)
+        .padding(.leading, sidebarState.isVisible ? 12 : titlebarLeadingInset)
+        .padding(.trailing, 8)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            NSApp.keyWindow?.zoom(nil)
+        }
+        .background(TitlebarLeadingInsetReader(inset: $titlebarLeadingInset))
+    }
+
+    private func updateTitlebarText() {
+        guard let selectedId = tabManager.selectedTabId,
+              let tab = tabManager.tabs.first(where: { $0.id == selectedId }) else {
+            titlebarText = ""
+            return
+        }
+        let title = tab.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        titlebarText = title
+    }
+
+    private var focusedDirectory: String? {
+        guard let selectedId = tabManager.selectedTabId,
+              let tab = tabManager.tabs.first(where: { $0.id == selectedId }) else {
+            return nil
+        }
+        // Use focused surface's directory if available
+        if let focusedSurfaceId = tab.focusedSurfaceId,
+           let surfaceDir = tab.surfaceDirectories[focusedSurfaceId] {
+            let trimmed = surfaceDir.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        let dir = tab.currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        return dir.isEmpty ? nil : dir
+    }
+
+    var body: some View {
+        let useOverlay = sidebarBlendMode == SidebarBlendModeOption.withinWindow.rawValue
+
+        Group {
+            if useOverlay {
+                // Overlay mode: terminal extends full width, sidebar on top
+                // This allows withinWindow blur to see the terminal content
+                ZStack(alignment: .leading) {
+                    terminalContent
+                        .padding(.leading, sidebarState.isVisible ? sidebarWidth : 0)
+                    if sidebarState.isVisible {
+                        sidebarView
+                    }
+                }
+            } else {
+                // Standard HStack mode for behindWindow blur
+                HStack(spacing: 0) {
+                    if sidebarState.isVisible {
+                        sidebarView
+                    }
+                    terminalContent
+                }
+            }
+        }
+        .frame(minWidth: 800, minHeight: 600)
+        .background(Color.clear)
+        .onAppear {
+            tabManager.applyWindowBackgroundForSelectedTab()
+            if selectedTabIds.isEmpty, let selectedId = tabManager.selectedTabId {
+                selectedTabIds = [selectedId]
+                lastSidebarSelectionIndex = tabManager.tabs.firstIndex { $0.id == selectedId }
+            }
+            updateTitlebarText()
+        }
+        .onChange(of: tabManager.selectedTabId) { newValue in
+            tabManager.applyWindowBackgroundForSelectedTab()
+            guard let newValue else { return }
+            if selectedTabIds.count <= 1 {
+                selectedTabIds = [newValue]
+                lastSidebarSelectionIndex = tabManager.tabs.firstIndex { $0.id == newValue }
+            }
+            updateTitlebarText()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .ghosttyDidSetTitle)) { notification in
+            guard let tabId = notification.userInfo?[GhosttyNotificationKey.tabId] as? UUID,
+                  tabId == tabManager.selectedTabId else { return }
+            updateTitlebarText()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .ghosttyDidFocusTab)) { _ in
+            sidebarSelection = .tabs
+            updateTitlebarText()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .ghosttyDidFocusSurface)) { notification in
+            guard let tabId = notification.userInfo?[GhosttyNotificationKey.tabId] as? UUID,
+                  tabId == tabManager.selectedTabId else { return }
+            updateTitlebarText()
+        }
+        .onReceive(tabManager.$tabs) { tabs in
+            let existingIds = Set(tabs.map { $0.id })
+            selectedTabIds = selectedTabIds.filter { existingIds.contains($0) }
+            if selectedTabIds.isEmpty, let selectedId = tabManager.selectedTabId {
+                selectedTabIds = [selectedId]
+            }
+            if let lastIndex = lastSidebarSelectionIndex, lastIndex >= tabs.count {
+                if let selectedId = tabManager.selectedTabId {
+                    lastSidebarSelectionIndex = tabs.firstIndex { $0.id == selectedId }
+                } else {
+                    lastSidebarSelectionIndex = nil
+                }
+            }
+        }
+        .onPreferenceChange(SidebarFramePreferenceKey.self) { frame in
+            sidebarMinX = frame.minX
+        }
+        .onChange(of: bgGlassTintHex) { _ in
+            updateWindowGlassTint()
+        }
+        .onChange(of: bgGlassTintOpacity) { _ in
+            updateWindowGlassTint()
+        }
+        .ignoresSafeArea()
+        .background(WindowAccessor { [sidebarBlendMode, bgGlassEnabled, bgGlassTintHex, bgGlassTintOpacity] window in
+            window.identifier = NSUserInterfaceItemIdentifier("cmux.main")
+            window.titlebarAppearsTransparent = true
+            window.styleMask.insert(.fullSizeContentView)
+            // Background glass: skip on macOS 26+ where NSGlassEffectView causes blank SwiftUI content.
+            // The transparency setup (non-opaque window + clear subview backgrounds) breaks rendering.
+            if sidebarBlendMode == SidebarBlendModeOption.behindWindow.rawValue && bgGlassEnabled
+                && !WindowGlassEffect.isAvailable {
+                window.isOpaque = false
+                window.backgroundColor = .clear
+                if let contentView = window.contentView {
+                    contentView.wantsLayer = true
+                    contentView.layer?.backgroundColor = NSColor.clear.cgColor
+                    contentView.layer?.isOpaque = false
+                    for subview in contentView.subviews {
+                        subview.wantsLayer = true
+                        subview.layer?.backgroundColor = NSColor.clear.cgColor
+                        subview.layer?.isOpaque = false
+                    }
+                }
+                let tintColor = (NSColor(hex: bgGlassTintHex) ?? .black).withAlphaComponent(bgGlassTintOpacity)
+                WindowGlassEffect.apply(to: window, tintColor: tintColor)
+            }
+            AppDelegate.shared?.attachTitlebarAccessory(to: window)
+            AppDelegate.shared?.applyWindowDecorations(to: window)
+        })
+    }
+
+    private func addTab() {
+        tabManager.addTab()
+        sidebarSelection = .tabs
+    }
+
+    private func updateWindowGlassTint() {
+        // Find main window by identifier (keyWindow might be the debug panel)
+        guard let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "cmux.main" }) else { return }
+        let tintColor = (NSColor(hex: bgGlassTintHex) ?? .black).withAlphaComponent(bgGlassTintOpacity)
+        WindowGlassEffect.updateTint(to: window, color: tintColor)
+    }
+}
+
+struct VerticalTabsSidebar: View {
+    @EnvironmentObject var tabManager: TabManager
+    @Binding var selection: SidebarSelection
+    @Binding var selectedTabIds: Set<UUID>
+    @Binding var lastSidebarSelectionIndex: Int?
+
+    /// Space at top of sidebar for traffic light buttons
+    private let trafficLightPadding: CGFloat = 28
+
+    var body: some View {
+        GeometryReader { proxy in
+            ScrollView {
+                VStack(spacing: 0) {
+                    // Space for traffic lights
+                    Spacer()
+                        .frame(height: trafficLightPadding)
+
+                    LazyVStack(spacing: 2) {
+                        ForEach(Array(tabManager.tabs.enumerated()), id: \.element.id) { index, tab in
+                            TabItemView(
+                                tab: tab,
+                                index: index,
+                                selection: $selection,
+                                selectedTabIds: $selectedTabIds,
+                                lastSidebarSelectionIndex: $lastSidebarSelectionIndex
+                            )
+                        }
+                    }
+                    .padding(.vertical, 8)
+
+                    SidebarEmptyArea(
+                        selection: $selection,
+                        selectedTabIds: $selectedTabIds,
+                        lastSidebarSelectionIndex: $lastSidebarSelectionIndex
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .frame(minHeight: proxy.size.height, alignment: .top)
+            }
+            .background(Color.clear)
+            .modifier(ClearScrollBackground())
+            .accessibilityIdentifier("Sidebar")
+        }
+        .ignoresSafeArea()
+        .background(SidebarBackdrop().ignoresSafeArea())
+    }
+}
+
+private struct SidebarFramePreferenceKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        value = nextValue()
+    }
+}
+
+private struct SidebarEmptyArea: View {
+    @EnvironmentObject var tabManager: TabManager
+    @Binding var selection: SidebarSelection
+    @Binding var selectedTabIds: Set<UUID>
+    @Binding var lastSidebarSelectionIndex: Int?
+
+    var body: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onTapGesture(count: 2) {
+                tabManager.addTab()
+                if let selectedId = tabManager.selectedTabId {
+                    selectedTabIds = [selectedId]
+                    lastSidebarSelectionIndex = tabManager.tabs.firstIndex { $0.id == selectedId }
+                }
+                selection = .tabs
+            }
+    }
+}
+
+struct TabItemView: View {
+    @EnvironmentObject var tabManager: TabManager
+    @EnvironmentObject var notificationStore: TerminalNotificationStore
+    @ObservedObject var tab: Tab
+    let index: Int
+    @Binding var selection: SidebarSelection
+    @Binding var selectedTabIds: Set<UUID>
+    @Binding var lastSidebarSelectionIndex: Int?
+    @State private var isHovering = false
+
+    var isActive: Bool {
+        tabManager.selectedTabId == tab.id
+    }
+
+    var isMultiSelected: Bool {
+        selectedTabIds.contains(tab.id)
+    }
+
+    @AppStorage("sidebarShowGitBranch") private var sidebarShowGitBranch = true
+    @AppStorage("sidebarShowGitBranchIcon") private var sidebarShowGitBranchIcon = false
+    @AppStorage("sidebarShowPorts") private var sidebarShowPorts = true
+    @AppStorage("sidebarShowLog") private var sidebarShowLog = true
+    @AppStorage("sidebarShowProgress") private var sidebarShowProgress = true
+    @AppStorage("sidebarShowStatusPills") private var sidebarShowStatusPills = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                let unreadCount = notificationStore.unreadCount(forTabId: tab.id)
+                if unreadCount > 0 {
+                    ZStack {
+                        Circle()
+                            .fill(isActive ? Color.white.opacity(0.25) : Color.accentColor)
+                        Text("\(unreadCount)")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(.white)
+                    }
+                    .frame(width: 16, height: 16)
+                }
+
+                if tab.isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(isActive ? .white.opacity(0.8) : .secondary)
+                }
+
+                Text(tab.title)
+                    .font(.system(size: 12))
+                    .foregroundColor(isActive ? .white : .primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Spacer()
+
+                Button(action: { tabManager.closeTab(tab) }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(isActive ? .white.opacity(0.7) : .secondary)
+                }
+                .buttonStyle(.plain)
+                .frame(width: 16, height: 16)
+                .opacity((isHovering && tabManager.tabs.count > 1) ? 1 : 0)
+                .allowsHitTesting(isHovering && tabManager.tabs.count > 1)
+            }
+
+            if let subtitle = latestNotificationText {
+                Text(subtitle)
+                    .font(.system(size: 10))
+                    .foregroundColor(isActive ? .white.opacity(0.8) : .secondary)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .multilineTextAlignment(.leading)
+            }
+
+            if sidebarShowStatusPills, !tab.statusEntries.isEmpty {
+                SidebarStatusPillsRow(
+                    entries: tab.statusEntries.values.sorted(by: { (lhs, rhs) in
+                        if lhs.timestamp != rhs.timestamp { return lhs.timestamp > rhs.timestamp }
+                        return lhs.key < rhs.key
+                    }),
+                    isActive: isActive,
+                    onFocus: { updateSelection() }
+                )
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            // Latest log entry
+            if sidebarShowLog, let latestLog = tab.logEntries.last {
+                HStack(spacing: 4) {
+                    Image(systemName: logLevelIcon(latestLog.level))
+                        .font(.system(size: 8))
+                        .foregroundColor(logLevelColor(latestLog.level, isActive: isActive))
+                    Text(latestLog.message)
+                        .font(.system(size: 10))
+                        .foregroundColor(isActive ? .white.opacity(0.8) : .secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            // Progress bar
+            if sidebarShowProgress, let progress = tab.progress {
+                VStack(alignment: .leading, spacing: 2) {
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(isActive ? Color.white.opacity(0.15) : Color.secondary.opacity(0.2))
+                            Capsule()
+                                .fill(isActive ? Color.white.opacity(0.8) : Color.accentColor)
+                                .frame(width: max(0, geo.size.width * CGFloat(progress.value)))
+                        }
+                    }
+                    .frame(height: 3)
+
+                    if let label = progress.label {
+                        Text(label)
+                            .font(.system(size: 9))
+                            .foregroundColor(isActive ? .white.opacity(0.6) : .secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            // Branch + directory row
+            if let dirRow = branchDirectoryRow {
+                HStack(spacing: 3) {
+                    if sidebarShowGitBranch && tab.gitBranch != nil && sidebarShowGitBranchIcon {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 9))
+                            .foregroundColor(isActive ? .white.opacity(0.6) : .secondary)
+                    }
+                    Text(dirRow)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(isActive ? .white.opacity(0.75) : .secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: tab.logEntries.count)
+        .animation(.easeInOut(duration: 0.2), value: tab.progress != nil)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(backgroundColor)
+        )
+        .padding(.horizontal, 6)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            updateSelection()
+        }
+        .onHover { hovering in
+            isHovering = hovering
+        }
+        .contextMenu {
+            let targetIds = contextTargetIds()
+            let shouldPin = !tab.isPinned
+            let pinLabel = targetIds.count > 1
+                ? (shouldPin ? "Pin Tabs" : "Unpin Tabs")
+                : (shouldPin ? "Pin Tab" : "Unpin Tab")
+            Button(pinLabel) {
+                for id in targetIds {
+                    if let tab = tabManager.tabs.first(where: { $0.id == id }) {
+                        tabManager.setPinned(tab, pinned: shouldPin)
+                    }
+                }
+                syncSelectionAfterMutation()
+            }
+
+            Button("Rename Tab…") {
+                promptRename()
+            }
+
+            if tab.hasCustomTitle {
+                Button("Remove Custom Name") {
+                    tabManager.clearCustomTitle(tabId: tab.id)
+                }
+            }
+
+            Divider()
+
+            Button("Close Tabs") {
+                closeTabs(targetIds, allowPinned: true)
+            }
+            .disabled(targetIds.isEmpty)
+
+            Button("Close Others") {
+                closeOtherTabs(targetIds)
+            }
+            .disabled(tabManager.tabs.count <= 1 || targetIds.count == tabManager.tabs.count)
+
+            Button("Close Tabs Below") {
+                closeTabsBelow(tabId: tab.id)
+            }
+            .disabled(index >= tabManager.tabs.count - 1)
+
+            Button("Close Tabs Above") {
+                closeTabsAbove(tabId: tab.id)
+            }
+            .disabled(index == 0)
+
+            Divider()
+
+            Button("Move to Top") {
+                tabManager.moveTabsToTop(Set(targetIds))
+                syncSelectionAfterMutation()
+            }
+            .disabled(targetIds.isEmpty)
+
+            Divider()
+
+            Button("Mark as Read") {
+                markTabsRead(targetIds)
+            }
+            .disabled(!hasUnreadNotifications(in: targetIds))
+
+            Button("Mark as Unread") {
+                markTabsUnread(targetIds)
+            }
+            .disabled(!hasReadNotifications(in: targetIds))
+        }
+    }
+
+    private var backgroundColor: Color {
+        if isActive {
+            return Color.accentColor
+        }
+        if isMultiSelected {
+            return Color.accentColor.opacity(0.25)
+        }
+        return Color.clear
+    }
+
+    private func updateSelection() {
+        let modifiers = NSEvent.modifierFlags
+        let isCommand = modifiers.contains(.command)
+        let isShift = modifiers.contains(.shift)
+
+        if isShift, let lastIndex = lastSidebarSelectionIndex {
+            let lower = min(lastIndex, index)
+            let upper = max(lastIndex, index)
+            let rangeIds = tabManager.tabs[lower...upper].map { $0.id }
+            if isCommand {
+                selectedTabIds.formUnion(rangeIds)
+            } else {
+                selectedTabIds = Set(rangeIds)
+            }
+        } else if isCommand {
+            if selectedTabIds.contains(tab.id) {
+                selectedTabIds.remove(tab.id)
+            } else {
+                selectedTabIds.insert(tab.id)
+            }
+        } else {
+            selectedTabIds = [tab.id]
+        }
+
+        lastSidebarSelectionIndex = index
+        tabManager.selectTab(tab)
+        selection = .tabs
+    }
+
+    private func contextTargetIds() -> [UUID] {
+        let baseIds: Set<UUID> = selectedTabIds.contains(tab.id) ? selectedTabIds : [tab.id]
+        return tabManager.tabs.compactMap { baseIds.contains($0.id) ? $0.id : nil }
+    }
+
+    private func closeTabs(_ targetIds: [UUID], allowPinned: Bool) {
+        let idsToClose = targetIds.filter { id in
+            guard let tab = tabManager.tabs.first(where: { $0.id == id }) else { return false }
+            return allowPinned || !tab.isPinned
+        }
+        for id in idsToClose {
+            if let tab = tabManager.tabs.first(where: { $0.id == id }) {
+                tabManager.closeTab(tab)
+            }
+        }
+        selectedTabIds.subtract(idsToClose)
+        syncSelectionAfterMutation()
+    }
+
+    private func closeOtherTabs(_ targetIds: [UUID]) {
+        let keepIds = Set(targetIds)
+        let idsToClose = tabManager.tabs.compactMap { keepIds.contains($0.id) ? nil : $0.id }
+        closeTabs(idsToClose, allowPinned: false)
+    }
+
+    private func closeTabsBelow(tabId: UUID) {
+        guard let anchorIndex = tabManager.tabs.firstIndex(where: { $0.id == tabId }) else { return }
+        let idsToClose = tabManager.tabs.suffix(from: anchorIndex + 1).map { $0.id }
+        closeTabs(idsToClose, allowPinned: false)
+    }
+
+    private func closeTabsAbove(tabId: UUID) {
+        guard let anchorIndex = tabManager.tabs.firstIndex(where: { $0.id == tabId }) else { return }
+        let idsToClose = tabManager.tabs.prefix(upTo: anchorIndex).map { $0.id }
+        closeTabs(idsToClose, allowPinned: false)
+    }
+
+    private func markTabsRead(_ targetIds: [UUID]) {
+        for id in targetIds {
+            notificationStore.markRead(forTabId: id)
+        }
+    }
+
+    private func markTabsUnread(_ targetIds: [UUID]) {
+        for id in targetIds {
+            notificationStore.markUnread(forTabId: id)
+        }
+    }
+
+    private func hasUnreadNotifications(in targetIds: [UUID]) -> Bool {
+        let targetSet = Set(targetIds)
+        return notificationStore.notifications.contains { targetSet.contains($0.tabId) && !$0.isRead }
+    }
+
+    private func hasReadNotifications(in targetIds: [UUID]) -> Bool {
+        let targetSet = Set(targetIds)
+        return notificationStore.notifications.contains { targetSet.contains($0.tabId) && $0.isRead }
+    }
+
+    private func syncSelectionAfterMutation() {
+        let existingIds = Set(tabManager.tabs.map { $0.id })
+        selectedTabIds = selectedTabIds.filter { existingIds.contains($0) }
+        if selectedTabIds.isEmpty, let selectedId = tabManager.selectedTabId {
+            selectedTabIds = [selectedId]
+        }
+        if let selectedId = tabManager.selectedTabId {
+            lastSidebarSelectionIndex = tabManager.tabs.firstIndex { $0.id == selectedId }
+        }
+    }
+
+    private var latestNotificationText: String? {
+        guard let notification = notificationStore.latestNotification(forTabId: tab.id) else { return nil }
+        let text = notification.body.isEmpty ? notification.title : notification.body
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private var branchDirectoryRow: String? {
+        var parts: [String] = []
+
+        // Git branch (if enabled and available)
+        if sidebarShowGitBranch, let git = tab.gitBranch {
+            let dirty = git.isDirty ? "*" : ""
+            parts.append("\(git.branch)\(dirty)")
+        }
+
+        // Directory summary
+        if let dirs = directorySummaryText {
+            parts.append(dirs)
+        }
+
+        // Ports (if enabled and available)
+        if sidebarShowPorts, !tab.listeningPorts.isEmpty {
+            let portsStr = tab.listeningPorts.map { ":\($0)" }.joined(separator: ",")
+            parts.append(portsStr)
+        }
+
+        let result = parts.joined(separator: " · ")
+        return result.isEmpty ? nil : result
+    }
+
+    private var directorySummaryText: String? {
+        guard let root = tab.splitTree.root else { return nil }
+        let surfaces = root.leaves()
+        guard !surfaces.isEmpty else { return nil }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        var seen: Set<String> = []
+        var entries: [String] = []
+        for surface in surfaces {
+            let directory = tab.surfaceDirectories[surface.id] ?? tab.currentDirectory
+            let shortened = shortenPath(directory, home: home)
+            guard !shortened.isEmpty else { continue }
+            if seen.insert(shortened).inserted {
+                entries.append(shortened)
+            }
+        }
+        return entries.isEmpty ? nil : entries.joined(separator: " | ")
+    }
+
+    private func logLevelIcon(_ level: SidebarLogLevel) -> String {
+        switch level {
+        case .info: return "circle.fill"
+        case .progress: return "arrowtriangle.right.fill"
+        case .success: return "checkmark.circle.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        case .error: return "xmark.circle.fill"
+        }
+    }
+
+    private func logLevelColor(_ level: SidebarLogLevel, isActive: Bool) -> Color {
+        if isActive {
+            switch level {
+            case .info: return .white.opacity(0.5)
+            case .progress: return .white.opacity(0.8)
+            case .success: return .white.opacity(0.9)
+            case .warning: return .white.opacity(0.9)
+            case .error: return .white.opacity(0.9)
+            }
+        }
+        switch level {
+        case .info: return .secondary
+        case .progress: return .blue
+        case .success: return .green
+        case .warning: return .orange
+        case .error: return .red
+        }
+    }
+
+    private func shortenPath(_ path: String, home: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return path }
+        if trimmed == home {
+            return "~"
+        }
+        if trimmed.hasPrefix(home + "/") {
+            return "~" + trimmed.dropFirst(home.count)
+        }
+        return trimmed
+    }
+
+    private func promptRename() {
+        let alert = NSAlert()
+        alert.messageText = "Rename Tab"
+        alert.informativeText = "Enter a custom name for this tab."
+        let input = NSTextField(string: tab.customTitle ?? tab.title)
+        input.placeholderString = "Tab name"
+        input.frame = NSRect(x: 0, y: 0, width: 240, height: 22)
+        alert.accessoryView = input
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        let alertWindow = alert.window
+        alertWindow.initialFirstResponder = input
+        DispatchQueue.main.async {
+            alertWindow.makeFirstResponder(input)
+            input.selectText(nil)
+        }
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+        tabManager.setCustomTitle(tabId: tab.id, title: input.stringValue)
+    }
+}
+
+private struct SidebarStatusPillsRow: View {
+    // Renamed/replaced: we now render status as normal text with an optional expand/collapse.
+    // Kept as a separate view for minimal churn in call sites.
+    let entries: [SidebarStatusEntry]
+    let isActive: Bool
+    let onFocus: () -> Void
+
+    @State private var isExpanded: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(statusText)
+                .font(.system(size: 10))
+                .foregroundColor(isActive ? .white.opacity(0.8) : .secondary)
+                .lineLimit(isExpanded ? nil : 3)
+                .truncationMode(.tail)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    onFocus()
+                    guard shouldShowToggle else { return }
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        isExpanded.toggle()
+                    }
+                }
+
+            if shouldShowToggle {
+                Button(isExpanded ? "Show less" : "Show more") {
+                    onFocus()
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        isExpanded.toggle()
+                    }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(isActive ? .white.opacity(0.65) : .secondary.opacity(0.9))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .help(statusText)
+    }
+
+    private var statusText: String {
+        entries
+            .map { entry in
+                // Render like notification text: show the status contents only.
+                // If the value is empty, fall back to the key so the line isn't blank.
+                let value = entry.value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !value.isEmpty { return value }
+                return entry.key
+            }
+            .joined(separator: "\n")
+    }
+
+    private var shouldShowToggle: Bool {
+        // We can't reliably measure truncation in SwiftUI without extra layout plumbing.
+        // Heuristic: show toggle when there are multiple entries or the text is long enough
+        // that it likely wraps past 3 lines in the sidebar.
+        entries.count > 1 || statusText.count > 120
+    }
+}
+
+enum SidebarSelection {
+    case tabs
+    case notifications
+}
+
+private struct ClearScrollBackground: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 13.0, *) {
+            content
+                .scrollContentBackground(.hidden)
+                .background(ScrollBackgroundClearer())
+        } else {
+            content
+                .background(ScrollBackgroundClearer())
+        }
+    }
+}
+
+private struct ScrollBackgroundClearer: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        NSView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let scrollView = findScrollView(startingAt: nsView) else { return }
+            // Clear all backgrounds and mark as non-opaque for transparency
+            scrollView.drawsBackground = false
+            scrollView.backgroundColor = .clear
+            scrollView.wantsLayer = true
+            scrollView.layer?.backgroundColor = NSColor.clear.cgColor
+            scrollView.layer?.isOpaque = false
+
+            scrollView.contentView.drawsBackground = false
+            scrollView.contentView.backgroundColor = .clear
+            scrollView.contentView.wantsLayer = true
+            scrollView.contentView.layer?.backgroundColor = NSColor.clear.cgColor
+            scrollView.contentView.layer?.isOpaque = false
+
+            if let docView = scrollView.documentView {
+                docView.wantsLayer = true
+                docView.layer?.backgroundColor = NSColor.clear.cgColor
+                docView.layer?.isOpaque = false
+            }
+        }
+    }
+
+    private func findScrollView(startingAt view: NSView) -> NSScrollView? {
+        var current: NSView? = view
+        while let candidate = current {
+            if let scrollView = candidate as? NSScrollView {
+                return scrollView
+            }
+            current = candidate.superview
+        }
+        return nil
+    }
+}
+
+private struct DraggableFolderIcon: View {
+    let directory: String
+
+    var body: some View {
+        DraggableFolderIconRepresentable(directory: directory)
+            .frame(width: 16, height: 16)
+            .help("Drag to open in Finder or another app")
+            .onTapGesture(count: 2) {
+                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: directory)
+            }
+    }
+}
+
+private struct DraggableFolderIconRepresentable: NSViewRepresentable {
+    let directory: String
+
+    func makeNSView(context: Context) -> DraggableFolderNSView {
+        DraggableFolderNSView(directory: directory)
+    }
+
+    func updateNSView(_ nsView: DraggableFolderNSView, context: Context) {
+        nsView.directory = directory
+        nsView.updateIcon()
+    }
+}
+
+private final class DraggableFolderNSView: NSView, NSDraggingSource {
+    var directory: String
+    private var imageView: NSImageView!
+    private static let iconSide: CGFloat = 16
+
+    init(directory: String) {
+        self.directory = directory
+        super.init(frame: .zero)
+        setupImageView()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func setupImageView() {
+        imageView = NSImageView()
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(imageView)
+        NSLayoutConstraint.activate([
+            imageView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            imageView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            imageView.topAnchor.constraint(equalTo: topAnchor),
+            imageView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+        updateIcon()
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: Self.iconSide, height: Self.iconSide)
+    }
+
+    func updateIcon() {
+        // NSWorkspace may return cached/shared NSImage instances. Never mutate the shared image size,
+        // since other callsites (e.g. dragging preview) may resize it and inadvertently affect layout.
+        let icon = (NSWorkspace.shared.icon(forFile: directory).copy() as? NSImage) ?? NSImage()
+        icon.size = NSSize(width: Self.iconSide, height: Self.iconSide)
+        imageView.image = icon
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        return context == .outsideApplication ? [.copy, .link] : .copy
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let fileURL = URL(fileURLWithPath: directory)
+        let draggingItem = NSDraggingItem(pasteboardWriter: fileURL as NSURL)
+
+        let iconImage = (NSWorkspace.shared.icon(forFile: directory).copy() as? NSImage) ?? NSImage()
+        iconImage.size = NSSize(width: 32, height: 32)
+        draggingItem.setDraggingFrame(bounds, contents: iconImage)
+
+        beginDraggingSession(with: [draggingItem], event: event, source: self)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        let menu = buildPathMenu()
+        // Pop up menu at bottom-left of icon (like native proxy icon)
+        let menuLocation = NSPoint(x: 0, y: bounds.height)
+        menu.popUp(positioning: nil, at: menuLocation, in: self)
+    }
+
+    private func buildPathMenu() -> NSMenu {
+        let menu = NSMenu()
+        let url = URL(fileURLWithPath: directory).standardized
+        var pathComponents: [URL] = []
+
+        // Build path from current directory up to root
+        var current = url
+        while current.path != "/" {
+            pathComponents.append(current)
+            current = current.deletingLastPathComponent()
+        }
+        pathComponents.append(URL(fileURLWithPath: "/"))
+
+        // Add path components (current dir at top, root at bottom - matches native macOS)
+        for pathURL in pathComponents {
+            let icon = (NSWorkspace.shared.icon(forFile: pathURL.path).copy() as? NSImage) ?? NSImage()
+            icon.size = NSSize(width: Self.iconSide, height: Self.iconSide)
+
+            let displayName: String
+            if pathURL.path == "/" {
+                // Use the volume name for root
+                if let volumeName = try? URL(fileURLWithPath: "/").resourceValues(forKeys: [.volumeNameKey]).volumeName {
+                    displayName = volumeName
+                } else {
+                    displayName = "Macintosh HD"
+                }
+            } else {
+                displayName = FileManager.default.displayName(atPath: pathURL.path)
+            }
+
+            let item = NSMenuItem(title: displayName, action: #selector(openPathComponent(_:)), keyEquivalent: "")
+            item.target = self
+            item.image = icon
+            item.representedObject = pathURL
+            menu.addItem(item)
+        }
+
+        // Add computer name at the bottom (like native proxy icon)
+        let computerName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        let computerIcon = (NSImage(named: NSImage.computerName)?.copy() as? NSImage) ?? NSImage()
+        computerIcon.size = NSSize(width: Self.iconSide, height: Self.iconSide)
+
+        let computerItem = NSMenuItem(title: computerName, action: #selector(openComputer(_:)), keyEquivalent: "")
+        computerItem.target = self
+        computerItem.image = computerIcon
+        menu.addItem(computerItem)
+
+        return menu
+    }
+
+    @objc private func openPathComponent(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: url.path)
+    }
+
+    @objc private func openComputer(_ sender: NSMenuItem) {
+        // Open "Computer" view in Finder (shows all volumes)
+        NSWorkspace.shared.open(URL(fileURLWithPath: "/", isDirectory: true))
+    }
+}
+
+/// Wrapper view that tries NSGlassEffectView (macOS 26+) when available or requested
+private struct SidebarVisualEffectBackground: NSViewRepresentable {
+    let material: NSVisualEffectView.Material
+    let blendingMode: NSVisualEffectView.BlendingMode
+    let state: NSVisualEffectView.State
+    let opacity: Double
+    let tintColor: NSColor?
+    let cornerRadius: CGFloat
+    let preferLiquidGlass: Bool
+
+    init(
+        material: NSVisualEffectView.Material = .hudWindow,
+        blendingMode: NSVisualEffectView.BlendingMode = .behindWindow,
+        state: NSVisualEffectView.State = .active,
+        opacity: Double = 1.0,
+        tintColor: NSColor? = nil,
+        cornerRadius: CGFloat = 0,
+        preferLiquidGlass: Bool = false
+    ) {
+        self.material = material
+        self.blendingMode = blendingMode
+        self.state = state
+        self.opacity = opacity
+        self.tintColor = tintColor
+        self.cornerRadius = cornerRadius
+        self.preferLiquidGlass = preferLiquidGlass
+    }
+
+    static var liquidGlassAvailable: Bool {
+        NSClassFromString("NSGlassEffectView") != nil
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        // Try NSGlassEffectView if preferred or if we want to test availability
+        if preferLiquidGlass, let glassClass = NSClassFromString("NSGlassEffectView") as? NSView.Type {
+            let glass = glassClass.init(frame: .zero)
+            glass.autoresizingMask = [.width, .height]
+            glass.wantsLayer = true
+            return glass
+        }
+
+        // Use NSVisualEffectView
+        let view = NSVisualEffectView()
+        view.autoresizingMask = [.width, .height]
+        view.wantsLayer = true
+        view.layerContentsRedrawPolicy = .onSetNeedsDisplay
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        // Configure based on view type
+        if nsView.className == "NSGlassEffectView" {
+            // NSGlassEffectView configuration via private API
+            nsView.alphaValue = max(0.0, min(1.0, opacity))
+            nsView.layer?.cornerRadius = cornerRadius
+            nsView.layer?.masksToBounds = cornerRadius > 0
+
+            // Try to set tint color via private selector
+            if let color = tintColor {
+                let selector = NSSelectorFromString("setTintColor:")
+                if nsView.responds(to: selector) {
+                    nsView.perform(selector, with: color)
+                }
+            }
+        } else if let visualEffect = nsView as? NSVisualEffectView {
+            // NSVisualEffectView configuration
+            visualEffect.material = material
+            visualEffect.blendingMode = blendingMode
+            visualEffect.state = state
+            visualEffect.alphaValue = max(0.0, min(1.0, opacity))
+            visualEffect.layer?.cornerRadius = cornerRadius
+            visualEffect.layer?.masksToBounds = cornerRadius > 0
+            visualEffect.needsDisplay = true
+        }
+    }
+}
+
+
+/// Reads the leading inset required to clear traffic lights + left titlebar accessories.
+private struct TitlebarLeadingInsetReader: NSViewRepresentable {
+    @Binding var inset: CGFloat
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.setFrameSize(.zero)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let window = nsView.window else { return }
+            // Start past the traffic lights
+            var leading: CGFloat = 78
+            // Add width of all left-aligned titlebar accessories
+            for accessory in window.titlebarAccessoryViewControllers
+                where accessory.layoutAttribute == .leading || accessory.layoutAttribute == .left {
+                leading += accessory.view.frame.width
+            }
+            leading += 16
+            if leading != inset {
+                inset = leading
+            }
+        }
+    }
+}
+
+private struct SidebarBackdrop: View {
+    @AppStorage("sidebarTintOpacity") private var sidebarTintOpacity = 0.54
+    @AppStorage("sidebarTintHex") private var sidebarTintHex = "#101010"
+    @AppStorage("sidebarMaterial") private var sidebarMaterial = SidebarMaterialOption.sidebar.rawValue
+    @AppStorage("sidebarBlendMode") private var sidebarBlendMode = SidebarBlendModeOption.behindWindow.rawValue
+    @AppStorage("sidebarState") private var sidebarState = SidebarStateOption.followWindow.rawValue
+    @AppStorage("sidebarCornerRadius") private var sidebarCornerRadius = 0.0
+    @AppStorage("sidebarBlurOpacity") private var sidebarBlurOpacity = 0.79
+
+    var body: some View {
+        let materialOption = SidebarMaterialOption(rawValue: sidebarMaterial)
+        let blendingMode = SidebarBlendModeOption(rawValue: sidebarBlendMode)?.mode ?? .behindWindow
+        let state = SidebarStateOption(rawValue: sidebarState)?.state ?? .active
+        let tintColor = (NSColor(hex: sidebarTintHex) ?? .black).withAlphaComponent(sidebarTintOpacity)
+        let cornerRadius = CGFloat(max(0, sidebarCornerRadius))
+        let useLiquidGlass = materialOption?.usesLiquidGlass ?? false
+        let useWindowLevelGlass = useLiquidGlass && blendingMode == .behindWindow
+
+        return ZStack {
+            if let material = materialOption?.material {
+                // When using liquidGlass + behindWindow, window handles glass + tint
+                // Sidebar is fully transparent
+                if !useWindowLevelGlass {
+                    SidebarVisualEffectBackground(
+                        material: material,
+                        blendingMode: blendingMode,
+                        state: state,
+                        opacity: sidebarBlurOpacity,
+                        tintColor: tintColor,
+                        cornerRadius: cornerRadius,
+                        preferLiquidGlass: useLiquidGlass
+                    )
+                    // Tint overlay for NSVisualEffectView fallback
+                    if !useLiquidGlass {
+                        Color(nsColor: tintColor)
+                    }
+                }
+            }
+            // When material is none or useWindowLevelGlass, render nothing
+        }
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    }
+}
+
+enum SidebarMaterialOption: String, CaseIterable, Identifiable {
+    case none
+    case liquidGlass  // macOS 26+ NSGlassEffectView
+    case sidebar
+    case hudWindow
+    case menu
+    case popover
+    case underWindowBackground
+    case windowBackground
+    case contentBackground
+    case fullScreenUI
+    case sheet
+    case headerView
+    case toolTip
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .none: return "None"
+        case .liquidGlass: return "Liquid Glass (macOS 26+)"
+        case .sidebar: return "Sidebar"
+        case .hudWindow: return "HUD Window"
+        case .menu: return "Menu"
+        case .popover: return "Popover"
+        case .underWindowBackground: return "Under Window"
+        case .windowBackground: return "Window Background"
+        case .contentBackground: return "Content Background"
+        case .fullScreenUI: return "Full Screen UI"
+        case .sheet: return "Sheet"
+        case .headerView: return "Header View"
+        case .toolTip: return "Tool Tip"
+        }
+    }
+
+    /// Returns true if this option should use NSGlassEffectView (macOS 26+)
+    var usesLiquidGlass: Bool {
+        self == .liquidGlass
+    }
+
+    var material: NSVisualEffectView.Material? {
+        switch self {
+        case .none: return nil
+        case .liquidGlass: return .underWindowBackground  // Fallback material
+        case .sidebar: return .sidebar
+        case .hudWindow: return .hudWindow
+        case .menu: return .menu
+        case .popover: return .popover
+        case .underWindowBackground: return .underWindowBackground
+        case .windowBackground: return .windowBackground
+        case .contentBackground: return .contentBackground
+        case .fullScreenUI: return .fullScreenUI
+        case .sheet: return .sheet
+        case .headerView: return .headerView
+        case .toolTip: return .toolTip
+        }
+    }
+}
+
+enum SidebarBlendModeOption: String, CaseIterable, Identifiable {
+    case behindWindow
+    case withinWindow
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .behindWindow: return "Behind Window"
+        case .withinWindow: return "Within Window"
+        }
+    }
+
+    var mode: NSVisualEffectView.BlendingMode {
+        switch self {
+        case .behindWindow: return .behindWindow
+        case .withinWindow: return .withinWindow
+        }
+    }
+}
+
+enum SidebarStateOption: String, CaseIterable, Identifiable {
+    case active
+    case inactive
+    case followWindow
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .active: return "Active"
+        case .inactive: return "Inactive"
+        case .followWindow: return "Follow Window"
+        }
+    }
+
+    var state: NSVisualEffectView.State {
+        switch self {
+        case .active: return .active
+        case .inactive: return .inactive
+        case .followWindow: return .followsWindowActiveState
+        }
+    }
+}
+
+enum SidebarPresetOption: String, CaseIterable, Identifiable {
+    case nativeSidebar
+    case glassBehind
+    case softBlur
+    case popoverGlass
+    case hudGlass
+    case underWindow
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .nativeSidebar: return "Native Sidebar"
+        case .glassBehind: return "Raycast Gray"
+        case .softBlur: return "Soft Blur"
+        case .popoverGlass: return "Popover Glass"
+        case .hudGlass: return "HUD Glass"
+        case .underWindow: return "Under Window"
+        }
+    }
+
+    var material: SidebarMaterialOption {
+        switch self {
+        case .nativeSidebar: return .sidebar
+        case .glassBehind: return .sidebar
+        case .softBlur: return .sidebar
+        case .popoverGlass: return .popover
+        case .hudGlass: return .hudWindow
+        case .underWindow: return .underWindowBackground
+        }
+    }
+
+    var blendMode: SidebarBlendModeOption {
+        switch self {
+        case .nativeSidebar: return .withinWindow
+        case .glassBehind: return .behindWindow
+        case .softBlur: return .behindWindow
+        case .popoverGlass: return .behindWindow
+        case .hudGlass: return .withinWindow
+        case .underWindow: return .withinWindow
+        }
+    }
+
+    var state: SidebarStateOption {
+        switch self {
+        case .nativeSidebar: return .followWindow
+        case .glassBehind: return .active
+        case .softBlur: return .active
+        case .popoverGlass: return .active
+        case .hudGlass: return .active
+        case .underWindow: return .followWindow
+        }
+    }
+
+    var tintHex: String {
+        switch self {
+        case .nativeSidebar: return "#000000"
+        case .glassBehind: return "#000000"
+        case .softBlur: return "#000000"
+        case .popoverGlass: return "#000000"
+        case .hudGlass: return "#000000"
+        case .underWindow: return "#000000"
+        }
+    }
+
+    var tintOpacity: Double {
+        switch self {
+        case .nativeSidebar: return 0.18
+        case .glassBehind: return 0.36
+        case .softBlur: return 0.28
+        case .popoverGlass: return 0.10
+        case .hudGlass: return 0.62
+        case .underWindow: return 0.14
+        }
+    }
+
+    var cornerRadius: Double {
+        switch self {
+        case .nativeSidebar: return 0.0
+        case .glassBehind: return 0.0
+        case .softBlur: return 0.0
+        case .popoverGlass: return 10.0
+        case .hudGlass: return 10.0
+        case .underWindow: return 6.0
+        }
+    }
+
+    var blurOpacity: Double {
+        switch self {
+        case .nativeSidebar: return 1.0
+        case .glassBehind: return 0.6
+        case .softBlur: return 0.45
+        case .popoverGlass: return 0.9
+        case .hudGlass: return 0.98
+        case .underWindow: return 0.9
+        }
+    }
+}
+
+extension NSColor {
+    func hexString() -> String {
+        let color = usingColorSpace(.sRGB) ?? self
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+        color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        return String(
+            format: "#%02X%02X%02X",
+            min(255, max(0, Int(red * 255))),
+            min(255, max(0, Int(green * 255))),
+            min(255, max(0, Int(blue * 255)))
+        )
+    }
+}

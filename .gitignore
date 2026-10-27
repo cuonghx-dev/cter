@@ -1,0 +1,37 @@
+# Xcode
+.build/
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# macOS
+.DS_Store
+
+# Local env
+.env
+
+# Swift Package Manager
+.swiftpm/
+
+# GhosttyKit binary (built from ghostty submodule via scripts/setup.sh)
+GhosttyKit.xcframework
+GhosttyKit.xcframework.bak-*/
+
+# Release artifacts
+GhosttyTabs-*.zip
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.hypothesis/
+.vercel
+
+# Zig
+.zig-cache/
+zig-out/
+
+# Node
+node_modules/
