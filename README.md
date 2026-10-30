@@ -1,5 +1,5 @@
 <h1 align="center">cter</h1>
-<p align="center">A Ghostty-based macOS terminal with vertical tabs and notifications for AI coding agents</p>
+<p align="center">A personal customize of lightweight cmux</p>
 
 ## Features
 
