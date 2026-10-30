@@ -1,6 +1,6 @@
 # Agent notes
 
-Minimal Ghostty-based macOS terminal (fork of cmux without auto-update, website, or release tooling).
+Minimal Ghostty-based macOS terminal, branded `cter` (fork of cmux without auto-update, website, or release tooling).
 
 ## Setup
 
@@ -11,7 +11,7 @@ Minimal Ghostty-based macOS terminal (fork of cmux without auto-update, website,
 ## Build & run
 
 ```bash
-xcodebuild -project GhosttyTabs.xcodeproj -scheme cmux -configuration Debug -destination 'platform=macOS' build
+xcodebuild -project GhosttyTabs.xcodeproj -scheme cter -configuration Debug -destination 'platform=macOS' build
 ./scripts/reload.sh               # kill + launch Debug app
 ./scripts/reload.sh --tag <name>  # isolated side-by-side app (own bundle ID, socket, derived data)
 ```
@@ -24,7 +24,7 @@ cd ghostty && zig build -Demit-xcframework=true -Doptimize=ReleaseFast
 
 ## Tests
 
-Python socket tests in `tests/` drive a running app over `/tmp/cmux.sock`:
+Python socket tests in `tests/` drive a running app over `/tmp/cter.sock`:
 
 ```bash
 python3 tests/test_ctrl_socket.py

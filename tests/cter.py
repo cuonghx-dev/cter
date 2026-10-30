@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-cmux Python Client
+cter Python Client
 
-A client library for programmatically controlling cmux via Unix socket.
+A client library for programmatically controlling cter via Unix socket.
 
 Usage:
-    from cmux import cmux
+    from cter import cter
 
-    client = cmux()
+    client = cter()
     client.connect()
 
     # Send text to terminal
@@ -38,13 +38,13 @@ import re
 from typing import Optional, List, Tuple, Union
 
 
-class cmuxError(Exception):
-    """Exception raised for cmux errors"""
+class cterError(Exception):
+    """Exception raised for cter errors"""
     pass
 
 
-_LAST_SOCKET_PATH_FILE = "/tmp/cmux-last-socket-path"
-_DEFAULT_DEBUG_BUNDLE_ID = "com.cmux.app.debug"
+_LAST_SOCKET_PATH_FILE = "/tmp/cter-last-socket-path"
+_DEFAULT_DEBUG_BUNDLE_ID = "com.cuonghx.cter.debug"
 
 
 def _sanitize_tag_slug(raw: str) -> str:
@@ -68,11 +68,11 @@ def _quote_option_value(value: str) -> str:
 
 
 def _default_bundle_id() -> str:
-    override = os.environ.get("CMUX_BUNDLE_ID")
+    override = os.environ.get("CTER_BUNDLE_ID")
     if override:
         return override
 
-    tag = os.environ.get("CMUX_TAG")
+    tag = os.environ.get("CTER_TAG")
     if tag:
         suffix = _sanitize_bundle_suffix(tag)
         return f"{_DEFAULT_DEBUG_BUNDLE_ID}.{suffix}"
@@ -110,12 +110,12 @@ def _can_connect(path: str, timeout: float = 0.15, retries: int = 4) -> bool:
 
 
 def _default_socket_path() -> str:
-    tag = os.environ.get("CMUX_TAG")
+    tag = os.environ.get("CTER_TAG")
     if tag:
         slug = _sanitize_tag_slug(tag)
         tagged_candidates = [
-            f"/tmp/cmux-debug-{slug}.sock",
-            f"/tmp/cmux-{slug}.sock",
+            f"/tmp/cter-debug-{slug}.sock",
+            f"/tmp/cter-{slug}.sock",
         ]
         for path in tagged_candidates:
             if os.path.exists(path) and _can_connect(path):
@@ -128,7 +128,7 @@ def _default_socket_path() -> str:
         # Prefer the debug naming convention when we have to guess.
         return tagged_candidates[0]
 
-    override = os.environ.get("CMUX_SOCKET_PATH")
+    override = os.environ.get("CTER_SOCKET_PATH")
     if override:
         if os.path.exists(override) and _can_connect(override):
             return override
@@ -142,13 +142,13 @@ def _default_socket_path() -> str:
             return last_socket
 
     # Prefer the non-tagged sockets when present.
-    candidates = ["/tmp/cmux-debug.sock", "/tmp/cmux.sock"]
+    candidates = ["/tmp/cter-debug.sock", "/tmp/cter.sock"]
     for path in candidates:
         if os.path.exists(path) and _can_connect(path):
             return path
 
     # Otherwise, fall back to the newest tagged debug socket if there is one.
-    tagged = glob.glob("/tmp/cmux-debug-*.sock")
+    tagged = glob.glob("/tmp/cter-debug-*.sock")
     tagged = [p for p in tagged if os.path.exists(p)]
     if tagged:
         tagged.sort(key=lambda p: os.path.getmtime(p), reverse=True)
@@ -159,8 +159,8 @@ def _default_socket_path() -> str:
     return candidates[0]
 
 
-class cmux:
-    """Client for controlling cmux via Unix socket"""
+class cter:
+    """Client for controlling cter via Unix socket"""
 
     @staticmethod
     def default_socket_path() -> str:
@@ -177,16 +177,16 @@ class cmux:
         self._recv_buffer: str = ""
 
     def connect(self) -> None:
-        """Connect to the cmux socket"""
+        """Connect to the cter socket"""
         if self._socket is not None:
             return
 
         start = time.time()
         while not os.path.exists(self.socket_path):
             if time.time() - start >= 2.0:
-                raise cmuxError(
+                raise cterError(
                     f"Socket not found at {self.socket_path}. "
-                    "Is cmux running?"
+                    "Is cter running?"
                 )
             time.sleep(0.1)
 
@@ -204,7 +204,7 @@ class cmux:
                 if e.errno in (errno.ECONNREFUSED, errno.ENOENT) and time.time() - start < 2.0:
                     time.sleep(0.1)
                     continue
-                raise cmuxError(f"Failed to connect: {e}")
+                raise cterError(f"Failed to connect: {e}")
 
     def close(self) -> None:
         """Close the connection"""
@@ -223,7 +223,7 @@ class cmux:
     def _send_command(self, command: str) -> str:
         """Send a command and receive response"""
         if self._socket is None:
-            raise cmuxError("Not connected")
+            raise cterError("Not connected")
 
         try:
             self._socket.sendall((command + "\n").encode())
@@ -242,7 +242,7 @@ class cmux:
                     if saw_newline:
                         break
                     if time.time() - start >= 5.0:
-                        raise cmuxError("Command timed out")
+                        raise cterError("Command timed out")
                     continue
                 if not chunk:
                     break
@@ -253,9 +253,9 @@ class cmux:
                 data = data[:-1]
             return data
         except socket.timeout:
-            raise cmuxError("Command timed out")
+            raise cterError("Command timed out")
         except socket.error as e:
-            raise cmuxError(f"Socket error: {e}")
+            raise cterError(f"Socket error: {e}")
 
     def ping(self) -> bool:
         """Check if the server is responding"""
@@ -289,25 +289,25 @@ class cmux:
         response = self._send_command("new_tab")
         if response.startswith("OK "):
             return response[3:]
-        raise cmuxError(response)
+        raise cterError(response)
 
     def new_split(self, direction: str) -> None:
         """Create a split in the given direction (left/right/up/down)."""
         response = self._send_command(f"new_split {direction}")
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def close_tab(self, tab_id: str) -> None:
         """Close a tab by ID"""
         response = self._send_command(f"close_tab {tab_id}")
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def select_tab(self, tab: Union[str, int]) -> None:
         """Select a tab by ID or index"""
         response = self._send_command(f"select_tab {tab}")
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def list_surfaces(self, tab: Union[str, int, None] = None) -> List[Tuple[int, str, bool]]:
         """
@@ -335,13 +335,13 @@ class cmux:
         """Focus a surface by ID or index in the current tab."""
         response = self._send_command(f"focus_surface {surface}")
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def current_tab(self) -> str:
         """Get the current tab's ID"""
         response = self._send_command("current_tab")
         if response.startswith("ERROR"):
-            raise cmuxError(response)
+            raise cterError(response)
         return response
 
     def send(self, text: str) -> None:
@@ -358,14 +358,14 @@ class cmux:
         escaped = text.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
         response = self._send_command(f"send {escaped}")
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def send_surface(self, surface: Union[str, int], text: str) -> None:
         """Send text to a specific surface by ID or index in the current tab."""
         escaped = text.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
         response = self._send_command(f"send_surface {surface} {escaped}")
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def send_key(self, key: str) -> None:
         """
@@ -378,13 +378,13 @@ class cmux:
         """
         response = self._send_command(f"send_key {key}")
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def send_key_surface(self, surface: Union[str, int], key: str) -> None:
         """Send a special key to a specific surface by ID or index in the current tab."""
         response = self._send_command(f"send_key_surface {surface} {key}")
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def send_line(self, text: str) -> None:
         """Send text followed by Enter"""
@@ -410,7 +410,7 @@ class cmux:
             payload = title
         response = self._send_command(f"notify {payload}")
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def notify_surface(self, surface: Union[str, int], title: str, subtitle: str = "", body: str = "") -> None:
         """Create a notification for a specific surface by ID or index."""
@@ -420,7 +420,7 @@ class cmux:
             payload = title
         response = self._send_command(f"notify_surface {surface} {payload}")
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def list_notifications(self) -> list[dict]:
         """
@@ -455,7 +455,7 @@ class cmux:
         """Clear all notifications."""
         response = self._send_command("clear_notifications")
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def set_app_focus(self, active: Union[bool, None]) -> None:
         """Override app focus state. Use None to clear override."""
@@ -465,13 +465,13 @@ class cmux:
             value = "active" if active else "inactive"
         response = self._send_command(f"set_app_focus {value}")
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def simulate_app_active(self) -> None:
         """Trigger the app active handler."""
         response = self._send_command("simulate_app_active")
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def set_status(self, key: str, value: str, icon: str = None, color: str = None, tab: str = None) -> None:
         """Set a sidebar status entry."""
@@ -486,7 +486,7 @@ class cmux:
         cmd += f" -- {_quote_option_value(value)}"
         response = self._send_command(cmd)
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def clear_status(self, key: str, tab: str = None) -> None:
         """Remove a sidebar status entry."""
@@ -495,7 +495,7 @@ class cmux:
             cmd += f" --tab={tab}"
         response = self._send_command(cmd)
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def log(self, message: str, level: str = None, source: str = None, tab: str = None) -> None:
         """Append a sidebar log entry."""
@@ -512,7 +512,7 @@ class cmux:
         cmd += f" -- {_quote_option_value(message)}"
         response = self._send_command(cmd)
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def set_progress(self, value: float, label: str = None, tab: str = None) -> None:
         """Set sidebar progress bar (0.0-1.0)."""
@@ -523,7 +523,7 @@ class cmux:
             cmd += f" --tab={tab}"
         response = self._send_command(cmd)
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def clear_progress(self, tab: str = None) -> None:
         """Clear sidebar progress bar."""
@@ -532,7 +532,7 @@ class cmux:
             cmd += f" --tab={tab}"
         response = self._send_command(cmd)
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def report_git_branch(self, branch: str, status: str = None, tab: str = None) -> None:
         """Report git branch for sidebar display."""
@@ -543,7 +543,7 @@ class cmux:
             cmd += f" --tab={tab}"
         response = self._send_command(cmd)
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def report_ports(self, *ports: int, tab: str = None) -> None:
         """Report listening ports for sidebar display."""
@@ -553,7 +553,7 @@ class cmux:
             cmd += f" --tab={tab}"
         response = self._send_command(cmd)
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def clear_ports(self, tab: str = None) -> None:
         """Clear listening ports for sidebar display."""
@@ -562,7 +562,7 @@ class cmux:
             cmd += f" --tab={tab}"
         response = self._send_command(cmd)
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def sidebar_state(self, tab: str = None) -> str:
         """Dump all sidebar metadata for a tab."""
@@ -578,7 +578,7 @@ class cmux:
             cmd += f" --tab={tab}"
         response = self._send_command(cmd)
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def focus_notification(self, tab: Union[str, int], surface: Union[str, int, None] = None) -> None:
         """Focus tab/surface using the notification flow."""
@@ -588,20 +588,20 @@ class cmux:
             command = f"focus_notification {tab} {surface}"
         response = self._send_command(command)
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def flash_count(self, surface: Union[str, int]) -> int:
         """Get flash count for a surface by ID or index."""
         response = self._send_command(f"flash_count {surface}")
         if response.startswith("OK "):
             return int(response.split(" ", 1)[1])
-        raise cmuxError(response)
+        raise cterError(response)
 
     def reset_flash_counts(self) -> None:
         """Reset flash counters."""
         response = self._send_command("reset_flash_counts")
         if not response.startswith("OK"):
-            raise cmuxError(response)
+            raise cterError(response)
 
     def read_screen(self) -> str:
         """Read the visible terminal text from the focused surface."""
@@ -609,11 +609,11 @@ class cmux:
 
 
 def main():
-    """CLI interface for cmux"""
+    """CLI interface for cter"""
     import sys
     import argparse
 
-    parser = argparse.ArgumentParser(description="cmux CLI")
+    parser = argparse.ArgumentParser(description="cter CLI")
     parser.add_argument("command", nargs="?", help="Command to send")
     parser.add_argument("args", nargs="*", help="Command arguments")
     parser.add_argument("-s", "--socket", default=None,
@@ -622,10 +622,10 @@ def main():
     args = parser.parse_args()
 
     try:
-        with cmux(args.socket) as client:
+        with cter(args.socket) as client:
             if not args.command:
                 # Interactive mode
-                print("cmux CLI (type 'help' for commands, 'quit' to exit)")
+                print("cter CLI (type 'help' for commands, 'quit' to exit)")
                 while True:
                     try:
                         line = input("> ").strip()
@@ -646,7 +646,7 @@ def main():
                     command += " " + " ".join(args.args)
                 response = client._send_command(command)
                 print(response)
-    except cmuxError as e:
+    except cterError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 

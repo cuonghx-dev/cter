@@ -7,7 +7,7 @@ separator. The log command must therefore send options before the message and
 use `--` so arbitrary message contents round-trip correctly.
 
 Run with a tagged instance to avoid unix socket conflicts:
-  CMUX_TAG=<tag> python3 tests/test_sidebar_log_parsing.py
+  CTER_TAG=<tag> python3 tests/test_sidebar_log_parsing.py
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from cmux import cmux, cmuxError  # noqa: E402
+from cter import cter, cterError  # noqa: E402
 
 
 def _assert_contains(text: str, needle: str) -> None:
@@ -28,7 +28,7 @@ def _assert_contains(text: str, needle: str) -> None:
 
 def main() -> int:
     try:
-        with cmux() as client:
+        with cter() as client:
             tab_id = client.new_tab()
             client.select_tab(tab_id)
             time.sleep(0.7)
@@ -54,7 +54,7 @@ def main() -> int:
         print("PASS: log messages preserve `--*` tokens")
         return 0
 
-    except (cmuxError, AssertionError) as exc:
+    except (cterError, AssertionError) as exc:
         print(f"FAIL: {exc}")
         return 1
 

@@ -3,7 +3,7 @@
 Automated test for ctrl+enter keybind using real keystrokes.
 
 Requires:
-  - cmux running
+  - cter running
   - Accessibility permissions for System Events (osascript)
   - keybind = ctrl+enter=text:\\r (or \\n/\\x0d) configured in Ghostty config
 """
@@ -15,10 +15,10 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-# Add the directory containing cmux.py to the path
+# Add the directory containing cter.py to the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from cmux import cmux, cmuxError
+from cter import cter, cterError
 
 
 def run_osascript(script: str) -> subprocess.CompletedProcess[str]:
@@ -73,7 +73,7 @@ def find_config_with_keybind() -> Optional[Path]:
     return None
 
 
-def test_ctrl_enter_keybind(client: cmux) -> tuple[bool, str]:
+def test_ctrl_enter_keybind(client: cter) -> tuple[bool, str]:
     marker = Path("/tmp") / f"ghostty_ctrl_enter_{os.getpid()}"
     marker.unlink(missing_ok=True)
 
@@ -83,7 +83,7 @@ def test_ctrl_enter_keybind(client: cmux) -> tuple[bool, str]:
     time.sleep(0.3)
     try:
         # Make sure the app is focused for keystrokes
-        bundle_id = cmux.default_bundle_id()
+        bundle_id = cter.default_bundle_id()
         run_osascript(f'tell application id "{bundle_id}" to activate')
         time.sleep(0.2)
 
@@ -115,14 +115,14 @@ def test_ctrl_enter_keybind(client: cmux) -> tuple[bool, str]:
 
 def run_tests() -> int:
     print("=" * 60)
-    print("cmux Ctrl+Enter Keybind Test")
+    print("cter Ctrl+Enter Keybind Test")
     print("=" * 60)
     print()
 
-    socket_path = cmux.default_socket_path()
+    socket_path = cter.default_socket_path()
     if not os.path.exists(socket_path):
         print(f"SKIP: Socket not found at {socket_path}")
-        print("Tip: start cmux first (or set CMUX_TAG / CMUX_SOCKET_PATH).")
+        print("Tip: start cter first (or set CTER_TAG / CTER_SOCKET_PATH).")
         return 0
 
     config_path = find_config_with_keybind()
@@ -135,12 +135,12 @@ def run_tests() -> int:
     print()
 
     try:
-        with cmux() as client:
+        with cter() as client:
             ok, message = test_ctrl_enter_keybind(client)
             status = "✅" if ok else "❌"
             print(f"{status} {message}")
             return 0 if ok else 1
-    except cmuxError as e:
+    except cterError as e:
         print(f"SKIP: {e}")
         return 0
     except subprocess.CalledProcessError as e:

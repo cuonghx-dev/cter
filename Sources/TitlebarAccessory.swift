@@ -600,7 +600,7 @@ final class TitlebarAccessoryController {
     private var didStart = false
     private let attachedWindows = NSHashTable<NSWindow>.weakObjects()
     private var observers: [NSObjectProtocol] = []
-    private let controlsIdentifier = NSUserInterfaceItemIdentifier("cmux.titlebarControls")
+    private let controlsIdentifier = NSUserInterfaceItemIdentifier("cter.titlebarControls")
     private let controlsControllers = NSHashTable<TitlebarControlsAccessoryViewController>.weakObjects()
 
     deinit {
@@ -670,14 +670,14 @@ final class TitlebarAccessoryController {
     }
 
     private func isSettingsWindow(_ window: NSWindow) -> Bool {
-        if window.identifier?.rawValue == "cmux.settings" {
+        if window.identifier?.rawValue == "cter.settings" {
             return true
         }
         return window.title == "Settings"
     }
 
     private func isMainTerminalWindow(_ window: NSWindow) -> Bool {
-        window.identifier?.rawValue == "cmux.main"
+        window.identifier?.rawValue == "cter.main"
     }
 
     /// After sidebar toggle on Sonoma, titlebar accessories can disappear. Re-add if needed.

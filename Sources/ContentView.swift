@@ -384,7 +384,7 @@ struct ContentView: View {
         }
         .ignoresSafeArea()
         .background(WindowAccessor { [sidebarBlendMode, bgGlassEnabled, bgGlassTintHex, bgGlassTintOpacity] window in
-            window.identifier = NSUserInterfaceItemIdentifier("cmux.main")
+            window.identifier = NSUserInterfaceItemIdentifier("cter.main")
             window.titlebarAppearsTransparent = true
             window.styleMask.insert(.fullSizeContentView)
             // Background glass: skip on macOS 26+ where NSGlassEffectView causes blank SwiftUI content.
@@ -418,7 +418,7 @@ struct ContentView: View {
 
     private func updateWindowGlassTint() {
         // Find main window by identifier (keyWindow might be the debug panel)
-        guard let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "cmux.main" }) else { return }
+        guard let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "cter.main" }) else { return }
         let tintColor = (NSColor(hex: bgGlassTintHex) ?? .black).withAlphaComponent(bgGlassTintOpacity)
         WindowGlassEffect.updateTint(to: window, color: tintColor)
     }

@@ -125,11 +125,11 @@ final class SocketClient {
     }
 }
 
-struct CMUXCLI {
+struct CTERCLI {
     let args: [String]
 
     func run() throws {
-        var socketPath = ProcessInfo.processInfo.environment["CMUX_SOCKET_PATH"] ?? "/tmp/cmux.sock"
+        var socketPath = ProcessInfo.processInfo.environment["CTER_SOCKET_PATH"] ?? "/tmp/cter.sock"
         var jsonOutput = false
 
         var index = 1
@@ -281,8 +281,8 @@ struct CMUXCLI {
             let subtitle = optionValue(commandArgs, name: "--subtitle") ?? ""
             let body = optionValue(commandArgs, name: "--body") ?? ""
 
-            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CMUX_TAB_ID"]
-            let panelArg = optionValue(commandArgs, name: "--panel") ?? ProcessInfo.processInfo.environment["CMUX_PANEL_ID"]
+            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CTER_TAB_ID"]
+            let panelArg = optionValue(commandArgs, name: "--panel") ?? ProcessInfo.processInfo.environment["CTER_PANEL_ID"]
 
             let targetTab = try resolveTabId(tabArg, client: client)
             let targetPanel = try resolvePanelId(panelArg, tabId: targetTab, client: client)
@@ -337,7 +337,7 @@ struct CMUXCLI {
 
             let key = remaining[0]
             let value = remaining[1...].joined(separator: " ")
-            let tabArg = explicitTab ?? ProcessInfo.processInfo.environment["CMUX_TAB_ID"]
+            let tabArg = explicitTab ?? ProcessInfo.processInfo.environment["CTER_TAB_ID"]
 
             // TerminalController.parseOptions treats any --* token as an option until a
             // `--` separator. Put options first and then use `--` so values can contain
@@ -355,7 +355,7 @@ struct CMUXCLI {
             guard let key else {
                 throw CLIError(message: "clear-status requires <key>")
             }
-            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CMUX_TAB_ID"]
+            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CTER_TAB_ID"]
             var cmd = "clear_status \(key)"
             if let tabArg { cmd += " --tab=\(tabArg)" }
             let response = try client.send(command: cmd)
@@ -367,7 +367,7 @@ struct CMUXCLI {
 	            let (level, argsWithoutLevel) = parseOption(commandArgs, name: "--level")
 	            let (source, argsWithoutSource) = parseOption(argsWithoutLevel, name: "--source")
 	            let (explicitTab, remaining) = parseOption(argsWithoutSource, name: "--tab")
-	            let tabArg = explicitTab ?? ProcessInfo.processInfo.environment["CMUX_TAB_ID"]
+	            let tabArg = explicitTab ?? ProcessInfo.processInfo.environment["CTER_TAB_ID"]
 	            let message = remaining.joined(separator: " ")
 	            guard !message.isEmpty else { throw CLIError(message: "log requires a message") }
 	            // TerminalController.parseOptions treats any --* token as an option until a
@@ -382,7 +382,7 @@ struct CMUXCLI {
 	            print(response)
 
         case "clear-log":
-            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CMUX_TAB_ID"]
+            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CTER_TAB_ID"]
             var cmd = "clear_log"
             if let tabArg { cmd += " --tab=\(tabArg)" }
             let response = try client.send(command: cmd)
@@ -393,7 +393,7 @@ struct CMUXCLI {
                 throw CLIError(message: "set-progress requires a value (0.0-1.0)")
             }
             let label = optionValue(commandArgs, name: "--label")
-            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CMUX_TAB_ID"]
+            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CTER_TAB_ID"]
             var cmd = "set_progress \(value)"
             if let label { cmd += " --label=\(quoteOptionValue(label))" }
             if let tabArg { cmd += " --tab=\(tabArg)" }
@@ -401,7 +401,7 @@ struct CMUXCLI {
             print(response)
 
         case "clear-progress":
-            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CMUX_TAB_ID"]
+            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CTER_TAB_ID"]
             var cmd = "clear_progress"
             if let tabArg { cmd += " --tab=\(tabArg)" }
             let response = try client.send(command: cmd)
@@ -412,7 +412,7 @@ struct CMUXCLI {
                 throw CLIError(message: "report-git-branch requires a branch name")
             }
             let status = optionValue(commandArgs, name: "--status")
-            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CMUX_TAB_ID"]
+            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CTER_TAB_ID"]
             var cmd = "report_git_branch \(branch)"
             if let status { cmd += " --status=\(status)" }
             if let tabArg { cmd += " --tab=\(tabArg)" }
@@ -423,7 +423,7 @@ struct CMUXCLI {
             // Remove options by position (flag + following value), not by string value,
             // so a port token that equals the tab arg isn't accidentally dropped.
             let (explicitTab, remaining) = parseOption(commandArgs, name: "--tab")
-            let tabArg = explicitTab ?? ProcessInfo.processInfo.environment["CMUX_TAB_ID"]
+            let tabArg = explicitTab ?? ProcessInfo.processInfo.environment["CTER_TAB_ID"]
             let ports = remaining
             guard !ports.isEmpty else {
                 throw CLIError(message: "report-ports requires at least one port number")
@@ -434,21 +434,21 @@ struct CMUXCLI {
             print(response)
 
         case "clear-ports":
-            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CMUX_TAB_ID"]
+            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CTER_TAB_ID"]
             var cmd = "clear_ports"
             if let tabArg { cmd += " --tab=\(tabArg)" }
             let response = try client.send(command: cmd)
             print(response)
 
         case "sidebar-state":
-            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CMUX_TAB_ID"]
+            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CTER_TAB_ID"]
             var cmd = "sidebar_state"
             if let tabArg { cmd += " --tab=\(tabArg)" }
             let response = try client.send(command: cmd)
             print(response)
 
         case "reset-sidebar":
-            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CMUX_TAB_ID"]
+            let tabArg = optionValue(commandArgs, name: "--tab") ?? ProcessInfo.processInfo.environment["CTER_TAB_ID"]
             var cmd = "reset_sidebar"
             if let tabArg { cmd += " --tab=\(tabArg)" }
             let response = try client.send(command: cmd)
@@ -640,10 +640,10 @@ struct CMUXCLI {
 
     private func usage() -> String {
         return """
-        cmux - control cmux via Unix socket
+        cter - control cter via Unix socket
 
         Usage:
-          cmux [--socket PATH] [--json] <command> [options]
+          cter [--socket PATH] [--json] <command> [options]
 
         Commands:
           ping
@@ -678,15 +678,15 @@ struct CMUXCLI {
           help
 
         Environment:
-          CMUX_TAB_ID, CMUX_PANEL_ID, CMUX_SOCKET_PATH
+          CTER_TAB_ID, CTER_PANEL_ID, CTER_SOCKET_PATH
         """
     }
 }
 
 @main
-struct CMUXMain {
+struct CTERMain {
     static func main() {
-        let cli = CMUXCLI(args: CommandLine.arguments)
+        let cli = CTERCLI(args: CommandLine.arguments)
         do {
             try cli.run()
         } catch {

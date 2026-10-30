@@ -11,10 +11,10 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from cmux import cmux, cmuxError
+from cter import cter, cterError
 
 
-def wait_for_notification(client: cmux, surface_id: str, is_read: bool, timeout: float = 2.0) -> bool:
+def wait_for_notification(client: cter, surface_id: str, is_read: bool, timeout: float = 2.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         items = client.list_notifications()
@@ -25,7 +25,7 @@ def wait_for_notification(client: cmux, surface_id: str, is_read: bool, timeout:
     return False
 
 
-def surface_id_for_index(client: cmux, index: int) -> str:
+def surface_id_for_index(client: cter, index: int) -> str:
     surfaces = client.list_surfaces()
     for entry in surfaces:
         if entry[0] == index:
@@ -33,7 +33,7 @@ def surface_id_for_index(client: cmux, index: int) -> str:
     raise RuntimeError(f"Surface index {index} not found")
 
 
-def ensure_two_surfaces(client: cmux) -> None:
+def ensure_two_surfaces(client: cter) -> None:
     surfaces = client.list_surfaces()
     if len(surfaces) < 2:
         client.new_split("right")
@@ -42,7 +42,7 @@ def ensure_two_surfaces(client: cmux) -> None:
 
 def main() -> int:
     try:
-        with cmux() as client:
+        with cter() as client:
             client.set_app_focus(None)
             ensure_two_surfaces(client)
             client.focus_surface(0)
@@ -72,7 +72,7 @@ def main() -> int:
 
             print("PASS: Focus clears notification and flashes panel")
             return 0
-    except (cmuxError, RuntimeError) as exc:
+    except (cterError, RuntimeError) as exc:
         print(f"FAIL: {exc}")
         return 1
 

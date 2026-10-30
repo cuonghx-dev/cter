@@ -3,7 +3,7 @@ import SwiftUI
 import Darwin
 
 @main
-struct cmuxApp: App {
+struct cterApp: App {
     @StateObject private var tabManager = TabManager()
     @StateObject private var notificationStore = TerminalNotificationStore.shared
     @StateObject private var sidebarState = SidebarState()
@@ -106,7 +106,7 @@ struct cmuxApp: App {
                     updateSocketController()
                     appDelegate.configure(tabManager: tabManager, notificationStore: notificationStore, sidebarState: sidebarState)
                     applyAppearance()
-                    if ProcessInfo.processInfo.environment["CMUX_UI_TEST_SHOW_SETTINGS"] == "1" {
+                    if ProcessInfo.processInfo.environment["CTER_UI_TEST_SHOW_SETTINGS"] == "1" {
                         DispatchQueue.main.async {
                             NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
                         }
@@ -127,7 +127,7 @@ struct cmuxApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .appInfo) {
-                Button("About cmux") {
+                Button("About cter") {
                     showAboutPanel()
                 }
                 Button("Ghostty Settings…") {
@@ -312,7 +312,7 @@ struct cmuxApp: App {
 
     private func closePanelOrWindow() {
         if let window = NSApp.keyWindow,
-           window.identifier?.rawValue == "cmux.settings" {
+           window.identifier?.rawValue == "cter.settings" {
             window.performClose(nil)
             return
         }
@@ -339,7 +339,7 @@ private final class AboutWindowController: NSWindowController, NSWindowDelegate 
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
-        window.identifier = NSUserInterfaceItemIdentifier("cmux.about")
+        window.identifier = NSUserInterfaceItemIdentifier("cter.about")
         window.center()
         window.contentView = NSHostingView(rootView: AboutPanelView())
         AppDelegate.shared?.applyWindowDecorations(to: window)
@@ -361,16 +361,15 @@ private final class AboutWindowController: NSWindowController, NSWindowDelegate 
 private struct AboutPanelView: View {
     @Environment(\.openURL) private var openURL
 
-    private let githubURL = URL(string: "https://github.com/manaflow-ai/cmux")
-    private let docsURL = URL(string: "https://term.cmux.dev")
+    private let githubURL = URL(string: "https://github.com/cuonghx-dev/terminal")
 
     private var version: String? { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String }
     private var build: String? { Bundle.main.infoDictionary?["CFBundleVersion"] as? String }
     private var commit: String? {
-        if let value = Bundle.main.infoDictionary?["CMUXCommit"] as? String, !value.isEmpty {
+        if let value = Bundle.main.infoDictionary?["CTERCommit"] as? String, !value.isEmpty {
             return value
         }
-        let env = ProcessInfo.processInfo.environment["CMUX_COMMIT"] ?? ""
+        let env = ProcessInfo.processInfo.environment["CTER_COMMIT"] ?? ""
         return env.isEmpty ? nil : env
     }
     private var copyright: String? { Bundle.main.infoDictionary?["NSHumanReadableCopyright"] as? String }
@@ -385,7 +384,7 @@ private struct AboutPanelView: View {
 
             VStack(alignment: .center, spacing: 32) {
                 VStack(alignment: .center, spacing: 8) {
-                    Text("cmux")
+                    Text("cter")
                         .bold()
                         .font(.title)
                     Text("A Ghostty-based terminal with vertical tabs\nand a notification panel for macOS.")
@@ -406,18 +405,13 @@ private struct AboutPanelView: View {
                     }
                     let commitText = commit ?? "—"
                     let commitURL = commit.flatMap { hash in
-                        URL(string: "https://github.com/manaflow-ai/cmux/commit/\(hash)")
+                        URL(string: "https://github.com/cuonghx-dev/terminal/commit/\(hash)")
                     }
                     AboutPropertyRow(label: "Commit", text: commitText, url: commitURL)
                 }
                 .frame(maxWidth: .infinity)
 
                 HStack(spacing: 8) {
-                    if let url = docsURL {
-                        Button("Docs") {
-                            openURL(url)
-                        }
-                    }
                     if let url = githubURL {
                         Button("GitHub") {
                             openURL(url)
@@ -628,7 +622,7 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
 
-                Text("Overrides: CMUX_SOCKET_ENABLE, CMUX_SOCKET_MODE, and CMUX_SOCKET_PATH.")
+                Text("Overrides: CTER_SOCKET_ENABLE, CTER_SOCKET_MODE, and CTER_SOCKET_PATH.")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
@@ -675,7 +669,7 @@ private struct SettingsRootView: View {
     }
 
     private func configureSettingsWindow(_ window: NSWindow) {
-        window.identifier = NSUserInterfaceItemIdentifier("cmux.settings")
+        window.identifier = NSUserInterfaceItemIdentifier("cter.settings")
         window.title = ""
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = false
@@ -683,7 +677,7 @@ private struct SettingsRootView: View {
         window.styleMask.insert(.resizable)
         window.contentMinSize = NSSize(width: 420, height: 360)
         if window.toolbar == nil {
-            let toolbar = NSToolbar(identifier: NSToolbar.Identifier("cmux.settings.toolbar"))
+            let toolbar = NSToolbar(identifier: NSToolbar.Identifier("cter.settings.toolbar"))
             toolbar.displayMode = .iconOnly
             toolbar.sizeMode = .regular
             toolbar.allowsUserCustomization = false
@@ -696,7 +690,7 @@ private struct SettingsRootView: View {
         let accessories = window.titlebarAccessoryViewControllers
         for index in accessories.indices.reversed() {
             guard let identifier = accessories[index].view.identifier?.rawValue else { continue }
-            guard identifier.hasPrefix("cmux.") else { continue }
+            guard identifier.hasPrefix("cter.") else { continue }
             window.removeTitlebarAccessoryViewController(at: index)
         }
         AppDelegate.shared?.applyWindowDecorations(to: window)

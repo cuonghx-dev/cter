@@ -7,7 +7,7 @@ ports/cwd for a stale surface UUID. These updates should not pollute the sidebar
 state (stale ports/cwd).
 
 Run with a tagged instance to avoid unix socket conflicts:
-  CMUX_TAG=<tag> python3 tests/test_sidebar_invalid_panel.py
+  CTER_TAG=<tag> python3 tests/test_sidebar_invalid_panel.py
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from cmux import cmux, cmuxError  # noqa: E402
+from cter import cter, cterError  # noqa: E402
 
 
 def _parse_sidebar_state(text: str) -> dict[str, str]:
@@ -76,7 +76,7 @@ def _pick_absent_port(exclude: set[int]) -> int:
 
 def main() -> int:
     try:
-        with cmux() as client:
+        with cter() as client:
             tab_id = client.new_tab()
             client.select_tab(tab_id)
             time.sleep(0.8)
@@ -100,7 +100,7 @@ def main() -> int:
                 return 1
 
             # CWD: reporting against a bogus panel must not set cwd to that value.
-            unique_dir = f"/tmp/cmux_invalid_pwd_{os.getpid()}"
+            unique_dir = f"/tmp/cter_invalid_pwd_{os.getpid()}"
             client._send_command(f"report_pwd {unique_dir} --tab={tab_id} --panel={fake_panel}")
             time.sleep(0.3)
             state = client.sidebar_state(tab_id)
@@ -111,13 +111,13 @@ def main() -> int:
 
             try:
                 client.close_tab(tab_id)
-            except cmuxError:
+            except cterError:
                 pass
 
         print("PASS: invalid panel reports do not pollute sidebar metadata")
         return 0
 
-    except (cmuxError, RuntimeError, ValueError) as e:
+    except (cterError, RuntimeError, ValueError) as e:
         print(f"FAIL: {e}")
         return 1
 

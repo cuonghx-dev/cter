@@ -72,18 +72,18 @@ class GhosttyApp {
     private(set) var defaultBackgroundColor: NSColor = .windowBackgroundColor
     private(set) var defaultBackgroundOpacity: Double = 1.0
     let backgroundLogEnabled = {
-        if ProcessInfo.processInfo.environment["CMUX_DEBUG_BG"] == "1" {
+        if ProcessInfo.processInfo.environment["CTER_DEBUG_BG"] == "1" {
             return true
         }
         if ProcessInfo.processInfo.environment["GHOSTTYTABS_DEBUG_BG"] == "1" {
             return true
         }
-        if UserDefaults.standard.bool(forKey: "cmuxDebugBG") {
+        if UserDefaults.standard.bool(forKey: "cterDebugBG") {
             return true
         }
         return UserDefaults.standard.bool(forKey: "GhosttyTabsDebugBG")
     }()
-    private let backgroundLogURL = URL(fileURLWithPath: "/tmp/cmux-bg.log")
+    private let backgroundLogURL = URL(fileURLWithPath: "/tmp/cter-bg.log")
     private var appObservers: [NSObjectProtocol] = []
 
     private init() {
@@ -647,14 +647,14 @@ class GhosttyApp {
 
     private func activeMainWindow() -> NSWindow? {
         let keyWindow = NSApp.keyWindow
-        if keyWindow?.identifier?.rawValue == "cmux.main" {
+        if keyWindow?.identifier?.rawValue == "cter.main" {
             return keyWindow
         }
-        return NSApp.windows.first(where: { $0.identifier?.rawValue == "cmux.main" })
+        return NSApp.windows.first(where: { $0.identifier?.rawValue == "cter.main" })
     }
 
     func logBackground(_ message: String) {
-        let line = "cmux bg: \(message)\n"
+        let line = "cter bg: \(message)\n"
         if let data = line.data(using: .utf8) {
             if FileManager.default.fileExists(atPath: backgroundLogURL.path) == false {
                 FileManager.default.createFile(atPath: backgroundLogURL.path, contents: nil)
@@ -811,9 +811,9 @@ final class TerminalSurface: Identifiable, ObservableObject {
             }
         }
 
-        env["CMUX_PANEL_ID"] = id.uuidString
-        env["CMUX_TAB_ID"] = tabId.uuidString
-        env["CMUX_SOCKET_PATH"] = SocketControlSettings.socketPath()
+        env["CTER_PANEL_ID"] = id.uuidString
+        env["CTER_TAB_ID"] = tabId.uuidString
+        env["CTER_SOCKET_PATH"] = SocketControlSettings.socketPath()
 
         if let cliBinPath = Bundle.main.resourceURL?.appendingPathComponent("bin").path {
             let currentPath = env["PATH"]
@@ -831,8 +831,8 @@ final class TerminalSurface: Identifiable, ObservableObject {
         if shellIntegrationEnabled,
            let integrationDir = Bundle.main.resourceURL?
             .appendingPathComponent("shell-integration").path {
-            env["CMUX_SHELL_INTEGRATION"] = "1"
-            env["CMUX_SHELL_INTEGRATION_DIR"] = integrationDir
+            env["CTER_SHELL_INTEGRATION"] = "1"
+            env["CTER_SHELL_INTEGRATION_DIR"] = integrationDir
 
             // Prefer the per-surface environment (from Ghostty config/env vars),
             // falling back to the app's environment. This avoids regressions when
@@ -849,7 +849,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
                 // but we must not treat Ghostty's injected ZDOTDIR as the user's
                 // "real" ZDOTDIR (or zsh history will end up inside the app bundle).
                 //
-                // If the user explicitly set ZDOTDIR, preserve it in CMUX_ZSH_ZDOTDIR
+                // If the user explicitly set ZDOTDIR, preserve it in CTER_ZSH_ZDOTDIR
                 // so our wrapper can restore it immediately.
                 let candidateZdotdir = (env["ZDOTDIR"]?.isEmpty == false ? env["ZDOTDIR"] : nil)
                     ?? getenv("ZDOTDIR").map { String(cString: $0) }
@@ -866,7 +866,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
                         isGhosttyInjected = (candidateZdotdir == ghosttyZdotdir)
                     }
                     if !isGhosttyInjected {
-                        env["CMUX_ZSH_ZDOTDIR"] = candidateZdotdir
+                        env["CTER_ZSH_ZDOTDIR"] = candidateZdotdir
                     }
                 }
 
@@ -991,10 +991,10 @@ final class TerminalSurface: Identifiable, ObservableObject {
 
 class GhosttyNSView: NSView, NSUserInterfaceValidations {
     private static let focusDebugEnabled: Bool = {
-        if ProcessInfo.processInfo.environment["CMUX_FOCUS_DEBUG"] == "1" {
+        if ProcessInfo.processInfo.environment["CTER_FOCUS_DEBUG"] == "1" {
             return true
         }
-        return UserDefaults.standard.bool(forKey: "cmuxFocusDebug")
+        return UserDefaults.standard.bool(forKey: "cterFocusDebug")
     }()
     fileprivate static func focusLog(_ message: String) {
         guard focusDebugEnabled else { return }
@@ -2105,7 +2105,7 @@ final class GhosttySurfaceScrollView: NSView {
                 CAMediaTimingFunction(name: .easeOut),
                 CAMediaTimingFunction(name: .easeIn)
             ]
-            self.flashLayer.add(animation, forKey: "cmux.flash")
+            self.flashLayer.add(animation, forKey: "cter.flash")
         }
     }
 

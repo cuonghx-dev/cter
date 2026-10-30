@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Automated tests for Ctrl+C and Ctrl+D using the cmux socket interface.
+Automated tests for Ctrl+C and Ctrl+D using the cter socket interface.
 
 Usage:
     python3 test_ctrl_socket.py
 
 Requirements:
-    - cmux must be running with the socket controller enabled
+    - cter must be running with the socket controller enabled
 """
 
 import json
@@ -16,10 +16,10 @@ import time
 import tempfile
 from pathlib import Path
 
-# Add the directory containing cmux.py to the path
+# Add the directory containing cter.py to the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from cmux import cmux, cmuxError
+from cter import cter, cterError
 
 
 class TestResult:
@@ -37,7 +37,7 @@ class TestResult:
         self.message = msg
 
 
-def test_connection(client: cmux) -> TestResult:
+def test_connection(client: cter) -> TestResult:
     """Test that we can connect and ping the server"""
     result = TestResult("Connection")
     try:
@@ -50,7 +50,7 @@ def test_connection(client: cmux) -> TestResult:
     return result
 
 
-def test_ctrl_c(client: cmux) -> TestResult:
+def test_ctrl_c(client: cter) -> TestResult:
     """
     Test Ctrl+C by:
     1. Starting sleep command
@@ -98,7 +98,7 @@ def test_ctrl_c(client: cmux) -> TestResult:
     return result
 
 
-def test_ctrl_d(client: cmux) -> TestResult:
+def test_ctrl_d(client: cter) -> TestResult:
     """
     Test Ctrl+D by:
     1. Running cat command
@@ -140,7 +140,7 @@ def test_ctrl_d(client: cmux) -> TestResult:
     return result
 
 
-def test_ctrl_c_python(client: cmux) -> TestResult:
+def test_ctrl_c_python(client: cter) -> TestResult:
     """
     Test Ctrl+C with Python process
     """
@@ -179,13 +179,13 @@ def test_ctrl_c_python(client: cmux) -> TestResult:
     return result
 
 
-def test_environment_paths(client: cmux) -> TestResult:
+def test_environment_paths(client: cter) -> TestResult:
     """
     Verify that TERMINFO points to a real terminfo directory and that
     XDG_DATA_DIRS includes the app resources path (and defaults when unset).
     """
     result = TestResult("Environment Paths")
-    env_path = Path(tempfile.gettempdir()) / f"cmux_env_{os.getpid()}.json"
+    env_path = Path(tempfile.gettempdir()) / f"cter_env_{os.getpid()}.json"
     env_path.unlink(missing_ok=True)
 
     try:
@@ -267,21 +267,21 @@ def test_environment_paths(client: cmux) -> TestResult:
 def run_tests():
     """Run all tests"""
     print("=" * 60)
-    print("cmux Ctrl+C/D Automated Tests")
+    print("cter Ctrl+C/D Automated Tests")
     print("=" * 60)
     print()
 
-    socket_path = cmux().socket_path
+    socket_path = cter().socket_path
     if not os.path.exists(socket_path):
         print(f"Error: Socket not found at {socket_path}")
-        print("Please make sure cmux is running.")
-        print("Tip: set CMUX_TAG=<tag> or CMUX_SOCKET_PATH=<path> to target a tagged instance.")
+        print("Please make sure cter is running.")
+        print("Tip: set CTER_TAG=<tag> or CTER_SOCKET_PATH=<path> to target a tagged instance.")
         return 1
 
     results = []
 
     try:
-        with cmux() as client:
+        with cter() as client:
             # Test connection
             print("Testing connection...")
             results.append(test_connection(client))
@@ -326,7 +326,7 @@ def run_tests():
             print(f"  {status} {results[-1].message}")
             print()
 
-    except cmuxError as e:
+    except cterError as e:
         print(f"Error: {e}")
         return 1
 

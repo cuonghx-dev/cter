@@ -43,18 +43,18 @@ struct SocketControlSettings {
     }
 
     static func socketPath() -> String {
-        if let override = ProcessInfo.processInfo.environment["CMUX_SOCKET_PATH"], !override.isEmpty {
+        if let override = ProcessInfo.processInfo.environment["CTER_SOCKET_PATH"], !override.isEmpty {
             return override
         }
 #if DEBUG
-        return "/tmp/cmux-debug.sock"
+        return "/tmp/cter-debug.sock"
 #else
-        return "/tmp/cmux.sock"
+        return "/tmp/cter.sock"
 #endif
     }
 
     static func envOverrideEnabled() -> Bool? {
-        guard let raw = ProcessInfo.processInfo.environment["CMUX_SOCKET_ENABLE"], !raw.isEmpty else {
+        guard let raw = ProcessInfo.processInfo.environment["CTER_SOCKET_ENABLE"], !raw.isEmpty else {
             return nil
         }
 
@@ -69,7 +69,7 @@ struct SocketControlSettings {
     }
 
     static func envOverrideMode() -> SocketControlMode? {
-        guard let raw = ProcessInfo.processInfo.environment["CMUX_SOCKET_MODE"], !raw.isEmpty else {
+        guard let raw = ProcessInfo.processInfo.environment["CTER_SOCKET_MODE"], !raw.isEmpty else {
             return nil
         }
         return SocketControlMode(rawValue: raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())

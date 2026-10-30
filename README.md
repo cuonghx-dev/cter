@@ -1,4 +1,4 @@
-<h1 align="center">cmux</h1>
+<h1 align="center">cter</h1>
 <p align="center">A Ghostty-based macOS terminal with vertical tabs and notifications for AI coding agents</p>
 
 ## Features
@@ -17,12 +17,12 @@ Build it yourself (requires Xcode and zig 0.15.2):
 
 ```bash
 ./scripts/setup.sh
-./scripts/reload.sh --tag cmux-v0.27.0 --name cmux-v0.27.0
+./scripts/reload.sh --tag dev
 ```
 
-## Why cmux?
+## Why cter?
 
-Running multiple AI coding agents? cmux helps you manage them. Instead of losing track of which terminal needs input, the notification panel shows you exactly where to look.
+Running multiple AI coding agents? cter helps you manage them. Instead of losing track of which terminal needs input, the notification panel shows you exactly where to look.
 
 A native macOS app means it launches instantly, uses minimal RAM, and feels right at home on your Mac.
 
