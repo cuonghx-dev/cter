@@ -40,6 +40,10 @@ final class TerminalNotificationStore: ObservableObject {
     @Published private(set) var notifications: [TerminalNotification] = []
 
     private let center = UNUserNotificationCenter.current()
+    /// UNUserNotificationCenter's remove calls are synchronous XPC round-trips to
+    /// usernoted. When the daemon is slow they block the caller, which on the main
+    /// thread froze every terminal, so they run on this serial queue instead.
+    private let centerQueue = DispatchQueue(label: "com.cuonghx.cter.notifications", qos: .utility)
     private var hasRequestedAuthorization = false
     private var hasPromptedForSettings = false
 
@@ -94,7 +98,7 @@ final class TerminalNotificationStore: ObservableObject {
         guard let index = notifications.firstIndex(where: { $0.id == id }) else { return }
         if notifications[index].isRead { return }
         notifications[index].isRead = true
-        center.removeDeliveredNotifications(withIdentifiers: [id.uuidString])
+        removeSystemNotifications([id.uuidString])
     }
 
     func markRead(forTabId tabId: UUID) {
@@ -105,9 +109,7 @@ final class TerminalNotificationStore: ObservableObject {
                 idsToClear.append(notifications[index].id.uuidString)
             }
         }
-        if !idsToClear.isEmpty {
-            center.removeDeliveredNotifications(withIdentifiers: idsToClear)
-        }
+        removeSystemNotifications(idsToClear)
     }
 
     func markRead(forTabId tabId: UUID, surfaceId: UUID?) {
@@ -120,10 +122,7 @@ final class TerminalNotificationStore: ObservableObject {
                 idsToClear.append(notifications[index].id.uuidString)
             }
         }
-        if !idsToClear.isEmpty {
-            center.removeDeliveredNotifications(withIdentifiers: idsToClear)
-            center.removePendingNotificationRequests(withIdentifiers: idsToClear)
-        }
+        removeSystemNotifications(idsToClear, includePending: true)
     }
 
     func markUnread(forTabId tabId: UUID) {
@@ -136,15 +135,13 @@ final class TerminalNotificationStore: ObservableObject {
 
     func remove(id: UUID) {
         notifications.removeAll { $0.id == id }
-        center.removeDeliveredNotifications(withIdentifiers: [id.uuidString])
+        removeSystemNotifications([id.uuidString])
     }
 
     func clearAll() {
         let ids = notifications.map { $0.id.uuidString }
         notifications.removeAll()
-        if !ids.isEmpty {
-            center.removeDeliveredNotifications(withIdentifiers: ids)
-        }
+        removeSystemNotifications(ids)
     }
 
     func clearNotifications(forTabId tabId: UUID, surfaceId: UUID?) {
@@ -152,10 +149,7 @@ final class TerminalNotificationStore: ObservableObject {
             .filter { $0.tabId == tabId && $0.surfaceId == surfaceId }
             .map { $0.id.uuidString }
         notifications.removeAll { $0.tabId == tabId && $0.surfaceId == surfaceId }
-        if !ids.isEmpty {
-            center.removeDeliveredNotifications(withIdentifiers: ids)
-            center.removePendingNotificationRequests(withIdentifiers: ids)
-        }
+        removeSystemNotifications(ids, includePending: true)
     }
 
     func clearNotifications(forTabId tabId: UUID) {
@@ -163,9 +157,17 @@ final class TerminalNotificationStore: ObservableObject {
             .filter { $0.tabId == tabId }
             .map { $0.id.uuidString }
         notifications.removeAll { $0.tabId == tabId }
-        if !ids.isEmpty {
+        removeSystemNotifications(ids, includePending: true)
+    }
+
+    private func removeSystemNotifications(_ ids: [String], includePending: Bool = false) {
+        guard !ids.isEmpty else { return }
+        let center = self.center
+        centerQueue.async {
             center.removeDeliveredNotifications(withIdentifiers: ids)
-            center.removePendingNotificationRequests(withIdentifiers: ids)
+            if includePending {
+                center.removePendingNotificationRequests(withIdentifiers: ids)
+            }
         }
     }
 
@@ -246,10 +248,20 @@ final class TerminalNotificationStore: ObservableObject {
             alert.informativeText = "Notifications are disabled for cter. Enable them in System Settings to see alerts."
             alert.addButton(withTitle: "Open Settings")
             alert.addButton(withTitle: "Not Now")
-            let response = alert.runModal()
-            guard response == .alertFirstButtonReturn else { return }
-            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications") {
-                NSWorkspace.shared.open(url)
+
+            let handleResponse: (NSApplication.ModalResponse) -> Void = { response in
+                guard response == .alertFirstButtonReturn else { return }
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+
+            // Use a window-modal sheet: an app-modal runModal() blocks the main thread,
+            // freezing every terminal (and socket commands) until the alert is dismissed.
+            if let window = NSApp.keyWindow ?? NSApp.mainWindow, window.attachedSheet == nil {
+                alert.beginSheetModal(for: window, completionHandler: handleResponse)
+            } else {
+                handleResponse(alert.runModal())
             }
         }
     }
