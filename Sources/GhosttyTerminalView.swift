@@ -237,6 +237,7 @@ class GhosttyApp {
         guard let app else { return }
         if soft, let config {
             ghostty_app_update_config(app, config)
+            GhosttyConfig.reloadShared()
             NotificationCenter.default.post(name: .ghosttyConfigDidReload, object: nil)
             return
         }
@@ -253,6 +254,7 @@ class GhosttyApp {
             ghostty_config_free(oldConfig)
         }
         config = newConfig
+        GhosttyConfig.reloadShared()
         NotificationCenter.default.post(name: .ghosttyConfigDidReload, object: nil)
     }
 
@@ -687,6 +689,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
 
     private(set) var surface: ghostty_surface_t?
     private weak var attachedView: GhosttyNSView?
+    private var isVisible = true
     let id: UUID
     let tabId: UUID
     private let surfaceContext: ghostty_surface_context_e
@@ -922,7 +925,22 @@ final class TerminalSurface: Identifiable, ObservableObject {
         // Ghostty needs the display id to drive vsync. Without it the renderer can believe
         // vsync is running but never deliver frames, which looks like a frozen terminal.
         assertDisplayID(for: view)
+        if !isVisible {
+            ghostty_surface_set_occlusion(surface, false)
+        }
         ghostty_surface_refresh(surface)
+    }
+
+    /// Hidden surfaces (background tabs, unselected pane tabs) stay mounted, so tell Ghostty
+    /// they are occluded to pause their renderer; otherwise every open terminal keeps drawing.
+    func setVisible(_ visible: Bool) {
+        guard visible != isVisible else { return }
+        isVisible = visible
+        guard let surface else { return }
+        ghostty_surface_set_occlusion(surface, visible)
+        if visible {
+            refreshForCurrentDisplay()
+        }
     }
 
     /// Reassert the display id and force a redraw. Used after the view is reparented
@@ -2537,11 +2555,13 @@ extension GhosttyNSView: NSTextInputClient {
 struct GhosttyTerminalView: NSViewRepresentable {
     let terminalSurface: TerminalSurface
     var isActive: Bool = true
+    var isVisible: Bool = true
     var onFocus: ((UUID) -> Void)? = nil
     var onTriggerFlash: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> GhosttySurfaceScrollView {
         let view = terminalSurface.hostedView
+        terminalSurface.setVisible(isVisible)
         view.attachSurface(terminalSurface)
         view.setActive(isActive)
         view.setFocusHandler { onFocus?(terminalSurface.id) }
@@ -2550,6 +2570,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: GhosttySurfaceScrollView, context: Context) {
+        terminalSurface.setVisible(isVisible)
         nsView.attachSurface(terminalSurface)
         nsView.setActive(isActive)
         nsView.setFocusHandler { onFocus?(terminalSurface.id) }

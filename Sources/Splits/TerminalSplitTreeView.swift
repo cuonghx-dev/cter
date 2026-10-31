@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 struct TerminalSplitTreeView: View {
     @ObservedObject var tab: Tab
     let isTabActive: Bool
-    @State private var config = GhosttyConfig.load()
+    @State private var config = GhosttyConfig.shared
     @EnvironmentObject var notificationStore: TerminalNotificationStore
 
     var body: some View {
@@ -41,7 +41,7 @@ struct TerminalSplitTreeView: View {
                 .onChange(of: proxy.size) { tab.updateSplitViewSize($0) }
         })
         .onReceive(NotificationCenter.default.publisher(for: .ghosttyConfigDidReload)) { _ in
-            config = GhosttyConfig.load()
+            config = GhosttyConfig.shared
         }
     }
 }
@@ -163,6 +163,7 @@ private struct TerminalPaneView: View {
                     TerminalSurfaceView(
                         surface: surface,
                         isFocused: isTabActive && tab.focusedSurfaceId == surface.id,
+                        isVisible: isTabActive && isSelected,
                         isSplit: isSplit,
                         appearance: appearance,
                         tabId: tab.id,
@@ -376,6 +377,7 @@ private struct PaneBarButton: View {
 private struct TerminalSurfaceView: View {
     @ObservedObject var surface: TerminalSurface
     let isFocused: Bool
+    let isVisible: Bool
     let isSplit: Bool
     let appearance: SplitAppearance
     let tabId: UUID
@@ -388,6 +390,7 @@ private struct TerminalSurfaceView: View {
             GhosttyTerminalView(
                 terminalSurface: surface,
                 isActive: isFocused,
+                isVisible: isVisible,
                 onFocus: { _ in onFocus() },
                 onTriggerFlash: onTriggerFlash
             )

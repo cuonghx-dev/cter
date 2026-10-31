@@ -40,6 +40,13 @@ struct GhosttyConfig {
         return backgroundColor.darken(by: isLightBackground ? 0.08 : 0.4)
     }
 
+    /// Parsed config shared by views, so view inits don't re-read config files from disk.
+    private(set) static var shared = load()
+
+    static func reloadShared() {
+        shared = load()
+    }
+
     static func load() -> GhosttyConfig {
         var config = GhosttyConfig()
 
