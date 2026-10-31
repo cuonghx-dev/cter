@@ -276,9 +276,22 @@ struct ContentView: View {
         .padding(.trailing, 8)
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
-            NSApp.keyWindow?.zoom(nil)
+            performTitlebarDoubleClickAction(NSApp.keyWindow)
         }
         .background(TitlebarLeadingInsetReader(inset: $titlebarLeadingInset))
+    }
+
+    /// Mirrors System Settings > Desktop & Dock > "Double-click a window's title bar to".
+    private func performTitlebarDoubleClickAction(_ window: NSWindow?) {
+        guard let window else { return }
+        switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+        case "Minimize":
+            window.miniaturize(nil)
+        case "None":
+            break
+        default:
+            window.zoom(nil)
+        }
     }
 
     private func updateTitlebarText() {

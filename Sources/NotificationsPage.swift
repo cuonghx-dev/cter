@@ -105,20 +105,23 @@ struct NotificationsPage: View {
     }
 }
 
-private struct NotificationRow: View {
+/// Notification list row shared by the sidebar Notifications page and the titlebar popover.
+struct NotificationRow: View {
     let notification: TerminalNotification
     let tabTitle: String?
     let onOpen: () -> Void
     let onClear: () -> Void
     let focusedNotificationId: FocusState<UUID?>.Binding
+    /// Tighter spacing for the titlebar popover.
+    var compact: Bool = false
 
     @State private var isHovering = false
     @State private var isHoveringClear = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: compact ? 10 : 12) {
             Button(action: onOpen) {
-                HStack(alignment: .top, spacing: 12) {
+                HStack(alignment: .top, spacing: compact ? 10 : 12) {
                     Circle()
                         .fill(notification.isRead ? Color.clear : Color.accentColor)
                         .frame(width: 8, height: 8)
@@ -128,7 +131,7 @@ private struct NotificationRow: View {
                         )
                         .padding(.top, 6)
 
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: compact ? 4 : 6) {
                         HStack {
                             Text(notification.title)
                                 .font(.headline)
@@ -180,13 +183,13 @@ private struct NotificationRow: View {
             .accessibilityLabel("Dismiss Notification")
             .opacity(isHovering || !notification.isRead ? 1 : 0.6)
         }
-        .padding(12)
+        .padding(compact ? 10 : 12)
         .background(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: compact ? 8 : 10)
                 .fill(Color(nsColor: .controlBackgroundColor))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: compact ? 8 : 10)
                 .strokeBorder(Color.primary.opacity(isHovering ? 0.12 : 0.05), lineWidth: 1)
         )
         .onHover { isHovering = $0 }
@@ -214,7 +217,7 @@ private struct NotificationRow: View {
     }
 }
 
-private struct DefaultActionModifier: ViewModifier {
+struct DefaultActionModifier: ViewModifier {
     let isActive: Bool
 
     func body(content: Content) -> some View {

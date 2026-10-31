@@ -184,6 +184,15 @@ private struct TitlebarControlsView: View {
             .padding(.leading, 4)
     }
 
+    private var notificationsAccessibilityLabel: String {
+        let unread = notificationStore.unreadCount
+        switch unread {
+        case 0: return "Notifications"
+        case 1: return "Notifications, 1 unread"
+        default: return "Notifications, \(unread) unread"
+        }
+    }
+
     @ViewBuilder
     private func controlsGroup(config: TitlebarControlsStyleConfig) -> some View {
         let content = HStack(spacing: config.spacing) {
@@ -191,34 +200,38 @@ private struct TitlebarControlsView: View {
                 iconLabel(systemName: "sidebar.left", config: config)
             }
             .accessibilityLabel("Toggle Sidebar")
-            .help("Show or hide the sidebar (Cmd+B)")
+            .help("Show or hide the sidebar (⌘B)")
 
             TitlebarControlButton(config: config, action: onToggleNotifications) {
                 ZStack(alignment: .topTrailing) {
                     iconLabel(systemName: "bell", config: config)
 
                     if notificationStore.unreadCount > 0 {
-                        Text("\(min(notificationStore.unreadCount, 99))")
-                            .font(.system(size: max(8, config.badgeSize - 5), weight: .semibold))
+                        // Capsule widens for multi-digit counts instead of clipping them.
+                        Text(notificationStore.unreadCount > 99 ? "99+" : "\(notificationStore.unreadCount)")
+                            .font(.system(size: max(8, config.badgeSize - 5), weight: .semibold).monospacedDigit())
                             .foregroundColor(.white)
-                            .frame(width: config.badgeSize, height: config.badgeSize)
+                            .padding(.horizontal, 3)
+                            .frame(minWidth: config.badgeSize, minHeight: config.badgeSize)
                             .background(
-                                Circle().fill(Color.accentColor)
+                                Capsule().fill(Color.accentColor)
                             )
+                            .fixedSize()
                             .offset(x: config.badgeOffset.width, y: config.badgeOffset.height)
+                            .accessibilityHidden(true)
                     }
                 }
                 .frame(width: config.buttonSize, height: config.buttonSize)
             }
             .overlay(NotificationsAnchorView { viewModel.notificationsAnchorView = $0 }.allowsHitTesting(false))
-            .accessibilityLabel("Notifications")
-            .help("Show notifications (Cmd+Shift+I)")
+            .accessibilityLabel(notificationsAccessibilityLabel)
+            .help("Show notifications (\(KeyboardShortcutSettings.showNotificationsShortcut().displayString))")
 
             TitlebarControlButton(config: config, action: onNewTab) {
                 iconLabel(systemName: "plus", config: config)
             }
             .accessibilityLabel("New Tab")
-            .help("Open a new tab (Cmd+T or Cmd+N)")
+            .help("Open a new tab (⌘N)")
         }
 
         let paddedContent = content.padding(config.groupPadding)
@@ -461,12 +474,13 @@ private struct NotificationsPopoverView: View {
                 ScrollView {
                     LazyVStack(spacing: 8) {
                         ForEach(notificationStore.notifications) { notification in
-                            NotificationPopoverRow(
+                            NotificationRow(
                                 notification: notification,
                                 tabTitle: tabTitle(for: notification.tabId),
                                 onOpen: { open(notification) },
                                 onClear: { notificationStore.remove(id: notification.id) },
-                                focusedNotificationId: $focusedNotificationId
+                                focusedNotificationId: $focusedNotificationId,
+                                compact: true
                             )
                         }
                     }
@@ -510,88 +524,6 @@ private struct NotificationsPopoverView: View {
                 guard tabManager.focusedSurfaceId(for: notification.tabId) == surfaceId else { return }
             }
             notificationStore.markRead(id: notification.id)
-        }
-    }
-}
-
-private struct NotificationPopoverRow: View {
-    let notification: TerminalNotification
-    let tabTitle: String?
-    let onOpen: () -> Void
-    let onClear: () -> Void
-    let focusedNotificationId: FocusState<UUID?>.Binding
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Button(action: onOpen) {
-                HStack(alignment: .top, spacing: 10) {
-                    Circle()
-                        .fill(notification.isRead ? Color.clear : Color.accentColor)
-                        .frame(width: 8, height: 8)
-                        .overlay(
-                            Circle()
-                                .stroke(Color.accentColor.opacity(notification.isRead ? 0.2 : 1), lineWidth: 1)
-                        )
-                        .padding(.top, 6)
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(notification.title)
-                                .font(.headline)
-                                .foregroundColor(.primary)
-                            Spacer()
-                            Text(notification.createdAt.formatted(date: .omitted, time: .shortened))
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-
-                        if !notification.body.isEmpty {
-                            Text(notification.body)
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                                .lineLimit(3)
-                        }
-
-                        if let tabTitle {
-                            Text(tabTitle)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-
-                    Spacer(minLength: 0)
-                }
-                .padding(.trailing, 6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .focusable()
-            .focused(focusedNotificationId, equals: notification.id)
-            .modifier(DefaultActionModifier(isActive: focusedNotificationId.wrappedValue == notification.id))
-
-            Button(action: onClear) {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundColor(.secondary)
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color(nsColor: .controlBackgroundColor))
-        )
-    }
-}
-
-private struct DefaultActionModifier: ViewModifier {
-    let isActive: Bool
-
-    func body(content: Content) -> some View {
-        if isActive {
-            content.keyboardShortcut(.defaultAction)
-        } else {
-            content
         }
     }
 }

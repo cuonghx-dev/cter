@@ -545,65 +545,66 @@ struct SettingsView: View {
     @State private var notificationsShortcut = KeyboardShortcutSettings.showNotificationsShortcut()
     @State private var jumpToUnreadShortcut = KeyboardShortcutSettings.jumpToUnreadShortcut()
 
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Theme")
-                    .font(.headline)
+    @State private var showResetConfirmation = false
 
-                Picker("", selection: $appearanceMode) {
+    var body: some View {
+        Form {
+            Section("Appearance") {
+                Picker("Theme", selection: $appearanceMode) {
                     ForEach(AppearanceMode.visibleCases) { mode in
                         Text(mode.displayName).tag(mode.rawValue)
                     }
                 }
                 .pickerStyle(.radioGroup)
-                .labelsHidden()
+            }
 
-                Divider()
-
-                Text("Sidebar")
-                    .font(.headline)
-
+            Section {
                 Toggle("Show status", isOn: $sidebarShowStatusPills)
                 Toggle("Show git branch", isOn: $sidebarShowGitBranch)
                 Toggle("Show branch icon", isOn: $sidebarShowGitBranchIcon)
                     .disabled(!sidebarShowGitBranch)
+                    .padding(.leading, 18)
                 Toggle("Show listening ports", isOn: $sidebarShowPorts)
                 Toggle("Show latest log entry", isOn: $sidebarShowLog)
                 Toggle("Show progress bar", isOn: $sidebarShowProgress)
-                Toggle("Shell integration (auto-detect git branch and ports)", isOn: $sidebarShellIntegration)
+                Stepper(value: $sidebarMaxLogEntries, in: 10...500, step: 10) {
+                    LabeledContent("Max log entries") {
+                        Text("\(sidebarMaxLogEntries)").monospacedDigit()
+                    }
+                }
+            } header: {
+                Text("Sidebar")
+            }
 
-                Stepper("Max log entries: \(sidebarMaxLogEntries)", value: $sidebarMaxLogEntries, in: 10...500, step: 10)
-
-                Text("Shell integration injects a precmd hook to report git branch and ports automatically.")
+            Section {
+                Toggle("Shell integration", isOn: $sidebarShellIntegration)
+            } header: {
+                Text("Shell Integration")
+            } footer: {
+                Text("Injects a precmd hook so the sidebar can detect the git branch and listening ports automatically.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+            }
 
-                Divider()
-
-                Text("Keyboard Shortcuts")
-                    .font(.headline)
-
+            Section {
                 KeyboardShortcutRecorder(label: "Show Notifications", shortcut: $notificationsShortcut)
                     .onChange(of: notificationsShortcut) { newValue in
                         KeyboardShortcutSettings.setShowNotificationsShortcut(newValue)
                     }
-
                 KeyboardShortcutRecorder(label: "Jump to Unread", shortcut: $jumpToUnreadShortcut)
                     .onChange(of: jumpToUnreadShortcut) { newValue in
                         KeyboardShortcutSettings.setJumpToUnreadShortcut(newValue)
                     }
-
-                Text("Click to record a new shortcut.")
+            } header: {
+                Text("Keyboard Shortcuts")
+            } footer: {
+                Text("Click a shortcut, then press the new key combination.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+            }
 
-                Divider()
-
-                Text("Automation")
-                    .font(.headline)
-
-                Picker("", selection: $socketControlMode) {
+            Section {
+                Picker("Socket control", selection: $socketControlMode) {
                     ForEach(SocketControlMode.allCases) { mode in
                         VStack(alignment: .leading, spacing: 2) {
                             Text(mode.displayName)
@@ -615,32 +616,43 @@ struct SettingsView: View {
                     }
                 }
                 .pickerStyle(.radioGroup)
-                .labelsHidden()
                 .accessibilityIdentifier("AutomationSocketModePicker")
+            } header: {
+                Text("Automation")
+            } footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(
+                        "Exposes a local Unix socket for programmatic control. This can be a security risk on shared machines.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    Text("Environment overrides: CTER_SOCKET_ENABLE, CTER_SOCKET_MODE, CTER_SOCKET_PATH.")
+                        .textSelection(.enabled)
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
 
-                Text("Expose a local Unix socket for programmatic control. This can be a security risk on shared machines.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                Text("Overrides: CTER_SOCKET_ENABLE, CTER_SOCKET_MODE, and CTER_SOCKET_PATH.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                Divider()
-
+            Section {
                 HStack {
                     Spacer()
-                    Button("Reset All Settings") {
-                        resetAllSettings()
+                    Button("Reset All Settings…", role: .destructive) {
+                        showResetConfirmation = true
                     }
                     Spacer()
                 }
-                .padding(.top, 8)
             }
-            .padding(20)
-            .padding(.top, 4)
         }
-        .frame(minWidth: 420, minHeight: 360)
+        .formStyle(.grouped)
+        .frame(minWidth: 460, minHeight: 360)
+        .confirmationDialog(
+            "Reset all settings?",
+            isPresented: $showResetConfirmation
+        ) {
+            Button("Reset", role: .destructive) { resetAllSettings() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Theme, sidebar, shortcut and automation settings return to their defaults. This cannot be undone.")
+        }
     }
 
     private func resetAllSettings() {
@@ -675,7 +687,7 @@ private struct SettingsRootView: View {
         window.titlebarAppearsTransparent = false
         window.styleMask.remove(.fullSizeContentView)
         window.styleMask.insert(.resizable)
-        window.contentMinSize = NSSize(width: 420, height: 360)
+        window.contentMinSize = NSSize(width: 460, height: 360)
         if window.toolbar == nil {
             let toolbar = NSToolbar(identifier: NSToolbar.Identifier("cter.settings.toolbar"))
             toolbar.displayMode = .iconOnly
