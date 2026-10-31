@@ -6,6 +6,7 @@ import QuartzCore
 import Combine
 import Darwin
 import Carbon
+import UniformTypeIdentifiers
 
 private enum GhosttyPasteboardHelper {
     private static let selectionPasteboard = NSPasteboard(
@@ -13,6 +14,8 @@ private enum GhosttyPasteboardHelper {
     )
     private static let utf8PlainTextType = NSPasteboard.PasteboardType("public.utf8-plain-text")
     private static let shellEscapeCharacters = "\\ ()[]{}<>\"'`!#$&;|*?\t"
+    private static let objectReplacementCharacter = Character(UnicodeScalar(0xFFFC)!)
+    private static let maxClipboardImageSize = 10 * 1024 * 1024
 
     static func pasteboard(for location: ghostty_clipboard_e) -> NSPasteboard? {
         switch location {
@@ -26,23 +29,37 @@ private enum GhosttyPasteboardHelper {
     }
 
     static func stringContents(from pasteboard: NSPasteboard) -> String? {
-        if let urls = pasteboard.readObjects(forClasses: [NSURL.self]) as? [URL],
+        let types = pasteboard.types ?? []
+
+        if types.contains(.fileURL) || types.contains(.URL),
+           let urls = pasteboard.readObjects(forClasses: [NSURL.self]) as? [URL],
            !urls.isEmpty {
             return urls
                 .map { $0.isFileURL ? escapeForShell($0.path) : $0.absoluteString }
                 .joined(separator: " ")
         }
 
-        if let value = pasteboard.string(forType: .string) {
-            return value
+        if let plainText = plainTextContents(from: pasteboard) {
+            return plainText
         }
 
-        return pasteboard.string(forType: utf8PlainTextType)
+        if let richText = richTextContents(from: pasteboard) {
+            return richText
+        }
+
+        // Image-only clipboard (e.g. a screenshot): paste the path of a temporary
+        // copy so CLI tools can read the image.
+        return saveClipboardImageIfNeeded(from: pasteboard)
     }
 
     static func hasString(for location: ghostty_clipboard_e) -> Bool {
         guard let pasteboard = pasteboard(for: location) else { return false }
-        return (stringContents(from: pasteboard) ?? "").isEmpty == false
+        let types = pasteboard.types ?? []
+        if types.contains(.fileURL) || types.contains(.URL) ||
+            types.contains(.html) || types.contains(.rtf) || types.contains(.rtfd) {
+            return true
+        }
+        return types.contains(where: isPlainTextType) || hasImageData(in: pasteboard)
     }
 
     static func writeString(_ string: String, to location: ghostty_clipboard_e) {
@@ -52,11 +69,132 @@ private enum GhosttyPasteboardHelper {
     }
 
     private static func escapeForShell(_ value: String) -> String {
+        if value.contains(where: { $0 == "\n" || $0 == "\r" }) {
+            let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
+            return "'\(escaped)'"
+        }
         var result = value
         for char in shellEscapeCharacters {
             result = result.replacingOccurrences(of: String(char), with: "\\\(char)")
         }
         return result
+    }
+
+    private static func plainTextContents(from pasteboard: NSPasteboard) -> String? {
+        let allTypes = pasteboard.types ?? []
+
+        // Prefer UTF-8 plain text. Some apps (e.g. Qt-based ones) register
+        // `com.apple.traditional-mac-plain-text` (Mac OS Roman) first, which turns
+        // every non-Latin character into "?".
+        for preferred in [utf8PlainTextType, NSPasteboard.PasteboardType.string] {
+            guard allTypes.contains(preferred),
+                  let value = pasteboard.string(forType: preferred),
+                  !value.isEmpty else { continue }
+            return value
+        }
+
+        // Apps like Raycast only publish alternate plain-text UTIs.
+        for type in allTypes where type != utf8PlainTextType && type != .string && isPlainTextType(type) {
+            guard let value = pasteboard.string(forType: type), !value.isEmpty else { continue }
+            return value
+        }
+
+        return nil
+    }
+
+    private static func isPlainTextType(_ type: NSPasteboard.PasteboardType) -> Bool {
+        if type == .string || type == utf8PlainTextType {
+            return true
+        }
+        guard type != .html,
+              type != .rtf,
+              type != .rtfd,
+              type != .fileURL,
+              let utType = UTType(type.rawValue) else { return false }
+        return utType.conforms(to: .plainText)
+    }
+
+    private static func richTextContents(from pasteboard: NSPasteboard) -> String? {
+        let candidates: [(NSPasteboard.PasteboardType, NSAttributedString.DocumentType)] = [
+            (.html, .html), (.rtf, .rtf), (.rtfd, .rtfd),
+        ]
+        for (type, documentType) in candidates {
+            guard let data = pasteboard.data(forType: type)
+                    ?? pasteboard.string(forType: type)?.data(using: .utf8),
+                  let attributed = try? NSAttributedString(
+                    data: data,
+                    options: [
+                        .documentType: documentType,
+                        .characterEncoding: String.Encoding.utf8.rawValue,
+                    ],
+                    documentAttributes: nil
+                  ) else { continue }
+
+            // Attachments render as U+FFFC; drop them instead of pasting placeholders.
+            let text = attributed.string
+                .split(separator: objectReplacementCharacter, omittingEmptySubsequences: false)
+                .joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                return text
+            }
+        }
+        return nil
+    }
+
+    private static func hasImageData(in pasteboard: NSPasteboard) -> Bool {
+        let types = pasteboard.types ?? []
+        if types.contains(.tiff) || types.contains(.png) {
+            return true
+        }
+        return types.contains { type in
+            guard let utType = UTType(type.rawValue) else { return false }
+            return utType.conforms(to: .image)
+        }
+    }
+
+    private static func imageRepresentation(in pasteboard: NSPasteboard) -> (data: Data, fileExtension: String)? {
+        if let pngData = pasteboard.data(forType: .png) {
+            return (pngData, "png")
+        }
+
+        for type in pasteboard.types ?? [] {
+            guard type != .tiff,
+                  let utType = UTType(type.rawValue),
+                  utType.conforms(to: .image),
+                  let data = pasteboard.data(forType: type),
+                  let fileExtension = utType.preferredFilenameExtension,
+                  !fileExtension.isEmpty else { continue }
+            return (data, fileExtension)
+        }
+
+        // TIFF and anything else NSImage can decode: re-encode as PNG.
+        guard hasImageData(in: pasteboard),
+              let image = NSImage(pasteboard: pasteboard),
+              let tiffData = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiffData),
+              let pngData = bitmap.representation(using: .png, properties: [:]) else {
+            return nil
+        }
+        return (pngData, "png")
+    }
+
+    /// Saves an image-only clipboard to a temporary file and returns its shell-escaped path.
+    private static func saveClipboardImageIfNeeded(from pasteboard: NSPasteboard) -> String? {
+        guard let image = imageRepresentation(in: pasteboard),
+              image.data.count <= maxClipboardImageSize else { return nil }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        let filename = "clipboard-\(formatter.string(from: Date()))-\(UUID().uuidString.prefix(8)).\(image.fileExtension)"
+        let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        do {
+            try image.data.write(to: fileURL)
+        } catch {
+            return nil
+        }
+        return escapeForShell(fileURL.path)
     }
 }
 
@@ -1353,6 +1491,8 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         guard !content.isEmpty else { return }
 
         let inject = {
+            self.externalCommittedTextDepth += 1
+            defer { self.externalCommittedTextDepth -= 1 }
             self.insertText(content, replacementRange: NSRange(location: NSNotFound, length: 0))
         }
         if Thread.isMainThread {
@@ -1442,6 +1582,9 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     private var keyTextAccumulator: [String]? = nil
     private var markedText = NSMutableAttributedString()
     private var markedSelectedRange = NSRange(location: 0, length: 0)
+    private var numpadIMECommitDeduplicator = NumpadIMECommitDeduplicator()
+    /// > 0 while text arrives from an external tool (AX value, insertText: action).
+    private var externalCommittedTextDepth = 0
     // Set when interpretKeyEvents asks for deleteBackward: during the current keyDown.
     private var keyRequestedDeleteBackward = false
     private var lastPerformKeyEvent: TimeInterval?
@@ -1457,6 +1600,8 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     /// Some third-party voice input apps commit text through the responder-chain
     /// `insertText:` action (single-argument form); route it into NSTextInputClient.
     override func insertText(_ insertString: Any) {
+        externalCommittedTextDepth += 1
+        defer { externalCommittedTextDepth -= 1 }
         insertText(insertString, replacementRange: NSRange(location: NSNotFound, length: 0))
     }
 
@@ -1723,9 +1868,16 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
                 shouldSuppressShiftSpaceFallbackText(event: translationEvent, markedTextBefore: markedTextBefore)
             if let text = textForKeyEvent(translationEvent) {
                 if shouldSendText(text), !suppressFallbackText {
-                    text.withCString { ptr in
+                    let handled = text.withCString { ptr in
                         keyEvent.text = ptr
-                        _ = ghostty_surface_key(surface, keyEvent)
+                        return ghostty_surface_key(surface, keyEvent)
+                    }
+                    if handled {
+                        numpadIMECommitDeduplicator.recordFallback(
+                            text: text,
+                            event: event,
+                            sourceId: Self.currentKeyboardLayoutID
+                        )
                     }
                 } else {
                     keyEvent.consumed_mods = GHOSTTY_MODS_NONE
@@ -2709,6 +2861,77 @@ final class GhosttySurfaceScrollView: NSView {
     }
 }
 
+// MARK: - Numpad IME commit dedup
+
+/// Tracks raw numpad fallback sends that may be followed by a deferred IME commit
+/// for the same key (e.g. Traditional Chinese IMEs during a full-to-half-width
+/// transition). AppKit gives no token tying a late `insertText` back to its keyDown,
+/// so this is a narrow timing heuristic: numpad digits only, input-method sources
+/// only, one-shot matching, short expiry.
+private struct NumpadIMECommitDeduplicator {
+    private static let commitSuppressionWindow: TimeInterval = 0.25
+    private static let maxPendingCommits = 8
+
+    private struct PendingCommit {
+        let text: String
+        let keyCode: UInt16
+        let sourceId: String?
+        let timestamp: TimeInterval
+    }
+
+    private var pendingCommits: [PendingCommit] = []
+
+    mutating func recordFallback(text: String, event: NSEvent, sourceId: String?) {
+        let now = ProcessInfo.processInfo.systemUptime
+        pruneExpiredCommits(now: now)
+
+        guard normalizedNumpadFlags(event.modifierFlags) == [.numericPad],
+              let sourceId, sourceId.localizedCaseInsensitiveContains("inputmethod"),
+              text.allSatisfy(\.isNumber) else {
+            return
+        }
+
+        pendingCommits.append(PendingCommit(text: text, keyCode: event.keyCode, sourceId: sourceId, timestamp: now))
+        if pendingCommits.count > Self.maxPendingCommits {
+            pendingCommits.removeFirst(pendingCommits.count - Self.maxPendingCommits)
+        }
+    }
+
+    mutating func shouldSuppressCommit(
+        _ text: String,
+        currentEvent: NSEvent?,
+        sourceId: String?,
+        isExternalCommit: Bool,
+        keyTextAccumulatorIsActive: Bool
+    ) -> Bool {
+        if isExternalCommit {
+            pendingCommits.removeAll()
+            return false
+        }
+        guard !keyTextAccumulatorIsActive else { return false }
+
+        pruneExpiredCommits(now: ProcessInfo.processInfo.systemUptime)
+        guard let index = pendingCommits.firstIndex(where: { $0.text == text && $0.sourceId == sourceId }) else {
+            return false
+        }
+
+        let pendingCommit = pendingCommits.remove(at: index)
+        if let currentEvent, currentEvent.type == .keyDown {
+            return normalizedNumpadFlags(currentEvent.modifierFlags) == [.numericPad] &&
+                currentEvent.keyCode == pendingCommit.keyCode
+        }
+        return true
+    }
+
+    private mutating func pruneExpiredCommits(now: TimeInterval) {
+        pendingCommits.removeAll { now - $0.timestamp > Self.commitSuppressionWindow }
+    }
+
+    private func normalizedNumpadFlags(_ flags: NSEvent.ModifierFlags) -> NSEvent.ModifierFlags {
+        flags.intersection(.deviceIndependentFlagsMask).subtracting([.function, .capsLock])
+    }
+}
+
 // MARK: - NSTextInputClient
 
 extension GhosttyNSView: NSTextInputClient {
@@ -2905,6 +3128,17 @@ extension GhosttyNSView: NSTextInputClient {
         // Some IME/input-method paths call insertText with an empty payload to
         // flush state. There is no terminal text to send in that case.
         guard !chars.isEmpty else { return }
+
+        // A deferred IME commit can replay a numpad digit keyDown already sent.
+        if numpadIMECommitDeduplicator.shouldSuppressCommit(
+            chars,
+            currentEvent: NSApp.currentEvent,
+            sourceId: Self.currentKeyboardLayoutID,
+            isExternalCommit: externalCommittedTextDepth > 0,
+            keyTextAccumulatorIsActive: keyTextAccumulator != nil
+        ) {
+            return
+        }
 
         // If we have an accumulator, we're in a keyDown event - accumulate the text
         if keyTextAccumulator != nil {
