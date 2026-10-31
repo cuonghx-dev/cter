@@ -637,14 +637,14 @@ struct TabItemView: View {
 
                 if tab.isPinned {
                     Image(systemName: "pin.fill")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(isActive ? .white.opacity(0.8) : .secondary)
                 }
 
                 if isRenaming {
                     TextField("Tab name", text: $renameText)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 12))
+                        .font(.system(size: 13))
                         .foregroundColor(isActive ? .white : .primary)
                         .padding(.horizontal, 4)
                         .padding(.vertical, 1)
@@ -661,7 +661,7 @@ struct TabItemView: View {
                         .accessibilityLabel("Tab name")
                 } else {
                     Text(tab.title)
-                        .font(.system(size: 12))
+                        .font(.system(size: 13))
                         .foregroundColor(isActive ? .white : .primary)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -690,7 +690,7 @@ struct TabItemView: View {
                 .overlay(alignment: .trailing) {
                     if let shortcutHint {
                         Text(shortcutHint)
-                            .font(.system(size: 10, weight: .medium, design: .rounded).monospacedDigit())
+                            .font(.system(size: 11, weight: .medium, design: .rounded).monospacedDigit())
                             .foregroundColor(isActive ? .white.opacity(0.85) : .secondary)
                             .fixedSize()
                             .transition(.opacity)
@@ -702,7 +702,7 @@ struct TabItemView: View {
 
             if let subtitle = latestNotificationText {
                 Text(subtitle)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundColor(isActive ? .white.opacity(0.8) : .secondary)
                     .lineLimit(2)
                     .truncationMode(.tail)
@@ -725,10 +725,10 @@ struct TabItemView: View {
             if sidebarShowLog, let latestLog = tab.logEntries.last {
                 HStack(spacing: 4) {
                     Image(systemName: logLevelIcon(latestLog.level))
-                        .font(.system(size: 8))
+                        .font(.system(size: 9))
                         .foregroundColor(logLevelColor(latestLog.level, isActive: isActive))
                     Text(latestLog.message)
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundColor(isActive ? .white.opacity(0.8) : .secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -752,7 +752,7 @@ struct TabItemView: View {
 
                     if let label = progress.label {
                         Text(label)
-                            .font(.system(size: 9))
+                            .font(.system(size: 10))
                             .foregroundColor(isActive ? .white.opacity(0.6) : .secondary)
                             .lineLimit(1)
                     }
@@ -765,11 +765,11 @@ struct TabItemView: View {
                 HStack(spacing: 3) {
                     if sidebarShowGitBranch && tab.gitBranch != nil && sidebarShowGitBranchIcon {
                         Image(systemName: "arrow.triangle.branch")
-                            .font(.system(size: 9))
+                            .font(.system(size: 10))
                             .foregroundColor(isActive ? .white.opacity(0.6) : .secondary)
                     }
                     Text(dirRow)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(isActive ? .white.opacity(0.75) : .secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -1200,7 +1200,7 @@ private struct SidebarStatusPillsRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(statusText)
-                .font(.system(size: 10))
+                .font(.system(size: 11))
                 .foregroundColor(isActive ? .white.opacity(0.8) : .secondary)
                 .lineLimit(isExpanded ? nil : 3)
                 .truncationMode(.tail)
@@ -1223,7 +1223,7 @@ private struct SidebarStatusPillsRow: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(isActive ? .white.opacity(0.65) : .secondary.opacity(0.9))
                 .frame(maxWidth: .infinity, alignment: .leading)
             }

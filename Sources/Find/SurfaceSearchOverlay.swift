@@ -60,6 +60,8 @@ struct SurfaceSearchOverlay: View {
                     Image(systemName: "chevron.up")
                 }
                 .buttonStyle(SearchButtonStyle())
+                .help("Next Match (⌘G)")
+                .accessibilityLabel("Next Match")
 
                 Button(action: {
                     _ = surface.performBindingAction("navigate_search:previous")
@@ -67,11 +69,15 @@ struct SurfaceSearchOverlay: View {
                     Image(systemName: "chevron.down")
                 }
                 .buttonStyle(SearchButtonStyle())
+                .help("Previous Match (⇧⌘G)")
+                .accessibilityLabel("Previous Match")
 
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                 }
                 .buttonStyle(SearchButtonStyle())
+                .help("Close Search (Esc)")
+                .accessibilityLabel("Close Search")
             }
             .padding(8)
             .background(.background)
@@ -173,7 +179,8 @@ struct SearchButtonStyle: ButtonStyle {
         configuration.label
             .foregroundStyle(isHovered || configuration.isPressed ? .primary : .secondary)
             .padding(.horizontal, 2)
-            .frame(height: 26)
+            .frame(minWidth: 26, minHeight: 26)
+            .contentShape(RoundedRectangle(cornerRadius: 6))
             .background(
                 RoundedRectangle(cornerRadius: 6)
                     .fill(backgroundColor(isPressed: configuration.isPressed))
