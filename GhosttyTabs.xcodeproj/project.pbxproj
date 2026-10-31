@@ -451,8 +451,8 @@
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = cter;
-				INFOPLIST_KEY_CFBundleName = cter;
+				INFOPLIST_KEY_CFBundleDisplayName = CTerminal;
+				INFOPLIST_KEY_CFBundleName = CTerminal;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMainStoryboardFile = "";
@@ -477,7 +477,8 @@
 				);
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.cuonghx.cter;
-				PRODUCT_NAME = cter;
+				PRODUCT_NAME = CTerminal;
+				PRODUCT_MODULE_NAME = cter;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "cter-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;

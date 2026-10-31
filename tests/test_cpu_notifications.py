@@ -68,7 +68,7 @@ def get_cter_pid() -> Optional[int]:
                     return pid
 
     result = subprocess.run(
-        ["pgrep", "-f", r"cter\.app/Contents/MacOS/cter$"],
+        ["pgrep", "-f", r"CTerminal\.app/Contents/MacOS/CTerminal$"],
         capture_output=True,
         text=True,
     )

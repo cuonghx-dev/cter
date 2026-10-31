@@ -178,7 +178,7 @@ final class TerminalNotificationStore: ObservableObject {
             let content = UNMutableNotificationContent()
             let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
                 ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
-                ?? "cter"
+                ?? "CTerminal"
             content.title = notification.title.isEmpty ? appName : notification.title
             content.subtitle = notification.subtitle
             content.body = notification.body
@@ -244,8 +244,8 @@ final class TerminalNotificationStore: ObservableObject {
             self.hasPromptedForSettings = true
 
             let alert = NSAlert()
-            alert.messageText = "Enable Notifications for cter"
-            alert.informativeText = "Notifications are disabled for cter. Enable them in System Settings to see alerts."
+            alert.messageText = "Enable Notifications for CTerminal"
+            alert.informativeText = "Notifications are disabled for CTerminal. Enable them in System Settings to see alerts."
             alert.addButton(withTitle: "Open Settings")
             alert.addButton(withTitle: "Not Now")
 

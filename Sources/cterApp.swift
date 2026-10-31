@@ -127,7 +127,7 @@ struct cterApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .appInfo) {
-                Button("About cter") {
+                Button("About CTerminal") {
                     showAboutPanel()
                 }
                 Button("Ghostty Settings…") {
@@ -384,7 +384,7 @@ private struct AboutPanelView: View {
 
             VStack(alignment: .center, spacing: 32) {
                 VStack(alignment: .center, spacing: 8) {
-                    Text("cter")
+                    Text("CTerminal")
                         .bold()
                         .font(.title)
                     Text("A Ghostty-based terminal with vertical tabs\nand a notification panel for macOS.")
