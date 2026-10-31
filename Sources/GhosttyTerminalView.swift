@@ -2377,23 +2377,23 @@ extension Notification.Name {
 private final class GhosttyScrollView: NSScrollView {
     weak var surfaceView: GhosttyNSView?
 
+    // Keep keyboard routing on the terminal surface; this wrapper is viewport plumbing.
+    override var acceptsFirstResponder: Bool { false }
+
     override func scrollWheel(with event: NSEvent) {
         guard let surfaceView else {
             super.scrollWheel(with: event)
             return
         }
 
-        if let surface = surfaceView.terminalSurface?.surface,
-           ghostty_surface_mouse_captured(surface) {
-            GhosttyNSView.focusLog("GhosttyScrollView.scrollWheel: mouseCaptured -> surface scroll")
-            if window?.firstResponder !== surfaceView {
-                window?.makeFirstResponder(surfaceView)
-            }
-            surfaceView.scrollWheel(with: event)
-        } else {
-            GhosttyNSView.focusLog("GhosttyScrollView.scrollWheel: super scroll")
-            super.scrollWheel(with: event)
+        // Route wheel gestures (e.g. over the padding) to the terminal surface so
+        // Ghostty handles scrollback. Letting NSScrollView consume them moves the
+        // wrapper viewport itself, which drifts the pane instead of scrolling.
+        GhosttyNSView.focusLog("GhosttyScrollView.scrollWheel: surface scroll")
+        if window?.firstResponder !== surfaceView {
+            window?.makeFirstResponder(surfaceView)
         }
+        surfaceView.scrollWheel(with: event)
     }
 }
 
