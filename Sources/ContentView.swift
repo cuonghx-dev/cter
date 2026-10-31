@@ -441,6 +441,8 @@ struct VerticalTabsSidebar: View {
 
     /// Tab currently being dragged for reorder; nil when no sidebar drag is in flight.
     @State private var draggingTabId: UUID?
+    @StateObject private var shortcutHints = CommandKeyHoldMonitor()
+    @Environment(\.controlActiveState) private var controlActiveState
 
     var body: some View {
         GeometryReader { proxy in
@@ -458,7 +460,10 @@ struct VerticalTabsSidebar: View {
                                 selection: $selection,
                                 selectedTabIds: $selectedTabIds,
                                 lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
-                                draggingTabId: $draggingTabId
+                                draggingTabId: $draggingTabId,
+                                shortcutHint: (shortcutHints.isHolding && controlActiveState == .key)
+                                    ? tabShortcutHint(index: index, count: tabManager.tabs.count)
+                                    : nil
                             )
                         }
                     }
@@ -479,6 +484,73 @@ struct VerticalTabsSidebar: View {
         }
         .ignoresSafeArea()
         .background(SidebarBackdrop().ignoresSafeArea())
+        .onAppear { shortcutHints.start() }
+        .onDisappear { shortcutHints.stop() }
+    }
+
+    /// Mirrors the Tab menu: Cmd+1...8 select by position, Cmd+9 selects the last tab.
+    private func tabShortcutHint(index: Int, count: Int) -> String? {
+        if index == count - 1 { return "⌘9" }
+        if index < 8 { return "⌘\(index + 1)" }
+        return nil
+    }
+}
+
+/// Publishes `isHolding` once Command has been held alone for a short delay, so tab shortcut
+/// hints appear for deliberate holds but not for ordinary Cmd+key chords.
+@MainActor
+final class CommandKeyHoldMonitor: ObservableObject {
+    @Published private(set) var isHolding = false
+
+    private var monitor: Any?
+    private var pending: DispatchWorkItem?
+    private var resignObserver: NSObjectProtocol?
+    private let delay: TimeInterval = 0.6
+
+    func start() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [weak self] event in
+            self?.handle(event)
+            return event
+        }
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.reset() }
+        }
+    }
+
+    func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
+        resignObserver = nil
+        reset()
+    }
+
+    private func handle(_ event: NSEvent) {
+        if event.type == .keyDown {
+            reset()
+            return
+        }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags == .command {
+            guard pending == nil, !isHolding else { return }
+            let work = DispatchWorkItem { [weak self] in
+                self?.pending = nil
+                self?.isHolding = true
+            }
+            pending = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        } else {
+            reset()
+        }
+    }
+
+    private func reset() {
+        pending?.cancel()
+        pending = nil
+        if isHolding { isHolding = false }
     }
 }
 
@@ -520,6 +592,8 @@ struct TabItemView: View {
     @Binding var selectedTabIds: Set<UUID>
     @Binding var lastSidebarSelectionIndex: Int?
     @Binding var draggingTabId: UUID?
+    /// Keyboard shortcut label (e.g. "⌘3") shown while Command is held; nil hides it.
+    var shortcutHint: String? = nil
     @State private var isHovering = false
     @State private var isHoveringClose = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -590,6 +664,17 @@ struct TabItemView: View {
                 .accessibilityLabel("Close Tab")
                 .opacity(showCloseButton ? 1 : 0)
                 .allowsHitTesting(showCloseButton)
+                .overlay(alignment: .trailing) {
+                    if let shortcutHint {
+                        Text(shortcutHint)
+                            .font(.system(size: 10, weight: .medium, design: .rounded).monospacedDigit())
+                            .foregroundColor(isActive ? .white.opacity(0.85) : .secondary)
+                            .fixedSize()
+                            .transition(.opacity)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: shortcutHint)
             }
 
             if let subtitle = latestNotificationText {
@@ -805,7 +890,7 @@ struct TabItemView: View {
     }
 
     private var showCloseButton: Bool {
-        isHovering && tabManager.tabs.count > 1
+        isHovering && tabManager.tabs.count > 1 && shortcutHint == nil
     }
 
     private var closeButtonForeground: Color {
