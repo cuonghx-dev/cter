@@ -165,8 +165,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             if self.handleCustomShortcut(event: event) {
                 return nil // Consume the event
             }
+            self.repairTerminalKeyRoutingIfNeeded(event: event)
             return event // Pass through
         }
+    }
+
+    /// Split close and pane-tab switches can leave the first responder on a view that
+    /// was removed or hidden (or on the window itself), so typing goes nowhere and the
+    /// terminal looks frozen. Before a plain key reaches AppKit, move focus back to
+    /// the focused terminal when the current responder can't route keys.
+    private func repairTerminalKeyRoutingIfNeeded(event: NSEvent) {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard !flags.contains(.command) else { return }
+        guard let window = event.window ?? NSApp.keyWindow,
+              window.attachedSheet == nil,
+              let tab = tabManager?.selectedTab,
+              let surface = tab.focusedSurface,
+              surface.hostedView.window === window else { return }
+
+        if let view = window.firstResponder as? NSView,
+           view.window === window,
+           !view.isHiddenOrHasHiddenAncestor,
+           view.superview != nil || view === window.contentView {
+            return
+        }
+
+        surface.hostedView.ensureFocus(for: tab.id, surfaceId: surface.id)
     }
 
     private func handleCustomShortcut(event: NSEvent) -> Bool {

@@ -1405,13 +1405,21 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         }
     }
 
+    fileprivate var hasUsableFocusGeometry: Bool {
+        bounds.width > 1 && bounds.height > 1
+    }
+
     override func becomeFirstResponder() -> Bool {
         let result = super.becomeFirstResponder()
         if result, let surface = surface {
             let now = CACurrentMediaTime()
             let deltaMs = (now - lastScrollEventTime) * 1000
             Self.focusLog("becomeFirstResponder: surface=\(terminalSurface?.id.uuidString ?? "nil") deltaSinceScrollMs=\(String(format: "%.2f", deltaMs))")
-            onFocus?()
+            // A hidden (background pane tab) or not-yet-laid-out view must not claim
+            // UI focus; doing so during split churn makes focus ping-pong between panes.
+            if hasUsableFocusGeometry && !isHiddenOrHasHiddenAncestor {
+                onFocus?()
+            }
 #if DEBUG
             if let terminalSurface {
                 AppDelegate.shared?.recordJumpUnreadFocusIfExpected(
@@ -2536,6 +2544,12 @@ final class GhosttySurfaceScrollView: NSView {
             return
         }
 
+        // Wait until the pane is visible and laid out before taking focus.
+        guard isUsableForFocus else {
+            scheduleFocusRetry(for: tabId, surfaceId: surfaceId, attempt: attempt)
+            return
+        }
+
         window.makeFirstResponder(surfaceView)
 
         if window.firstResponder !== surfaceView {
@@ -2587,6 +2601,11 @@ final class GhosttySurfaceScrollView: NSView {
                 return
             }
 
+            guard self.isUsableForFocus else {
+                self.requestFocus(delay: nextDelay)
+                return
+            }
+
             if let responder = window.firstResponder as? NSView, responder !== self.surfaceView {
                 _ = responder.resignFirstResponder()
             }
@@ -2605,6 +2624,12 @@ final class GhosttySurfaceScrollView: NSView {
         } else {
             queue.async(execute: work)
         }
+    }
+
+    private var isUsableForFocus: Bool {
+        !isHiddenOrHasHiddenAncestor &&
+            bounds.width > 1 && bounds.height > 1 &&
+            surfaceView.hasUsableFocusGeometry
     }
 
     func cancelFocusRequest() {
