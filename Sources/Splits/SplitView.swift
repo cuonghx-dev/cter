@@ -22,8 +22,14 @@ struct SplitView<L: View, R: View>: View {
     /// Called when the divider is double-tapped to equalize splits.
     let onEqualize: () -> Void
 
-    /// The minimum size (in points) of a split
-    let minSize: CGFloat = 10
+    /// The minimum size (in points) of a split. Large enough that a pane keeps its 28pt tab bar
+    /// plus a couple of terminal rows/columns instead of collapsing to an invisible sliver.
+    let minSize: CGFloat = 60
+
+    /// Within this distance (in points) of the midpoint, dragging snaps to an even split.
+    private let snapDistance: CGFloat = 6
+
+    @State private var isDragging = false
 
     /// The current fractional width of the split view. 0.5 means L/R are equally sized, for example.
     @Binding var split: CGFloat
@@ -31,7 +37,7 @@ struct SplitView<L: View, R: View>: View {
     /// The visible size of the splitter, in points. The invisible size is a transparent hitbox that can still
     /// be used for getting a resize handle. The total width/height of the splitter is the sum of both.
     private let splitterVisibleSize: CGFloat = 1
-    private let splitterInvisibleSize: CGFloat = 6
+    private let splitterInvisibleSize: CGFloat = 8
 
     var body: some View {
         GeometryReader { geo in
@@ -50,6 +56,7 @@ struct SplitView<L: View, R: View>: View {
                         visibleSize: splitterVisibleSize,
                         invisibleSize: splitterInvisibleSize,
                         color: dividerColor,
+                        isDragging: isDragging,
                         split: $split)
                     .position(splitterPoint)
                     .gesture(dragGesture(geo.size, splitterPoint: splitterPoint))
@@ -82,14 +89,20 @@ struct SplitView<L: View, R: View>: View {
     private func dragGesture(_ size: CGSize, splitterPoint: CGPoint) -> some Gesture {
         DragGesture()
             .onChanged { gesture in
-                switch direction {
-                case .horizontal:
-                    let new = min(max(minSize, gesture.location.x), size.width - minSize)
-                    split = new / size.width
-                case .vertical:
-                    let new = min(max(minSize, gesture.location.y), size.height - minSize)
-                    split = new / size.height
+                if !isDragging { isDragging = true }
+                let total = direction == .horizontal ? size.width : size.height
+                guard total > 0 else { return }
+                let location = direction == .horizontal ? gesture.location.x : gesture.location.y
+                // If the container is too small for both minimums, fall back to keeping it centered.
+                let lower = min(minSize, total / 2)
+                var new = min(max(lower, location), total - lower)
+                if abs(new - total / 2) < snapDistance {
+                    new = total / 2
                 }
+                split = new / total
+            }
+            .onEnded { _ in
+                isDragging = false
             }
     }
 
@@ -141,8 +154,14 @@ private struct Divider: View {
     let visibleSize: CGFloat
     let invisibleSize: CGFloat
     let color: Color
+    let isDragging: Bool
     @Binding var split: CGFloat
     @State private var isHovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Highlighted while hovered or dragged so the resize target is visible.
+    private var isEmphasized: Bool { isHovering || isDragging }
+    private let emphasizedSize: CGFloat = 3
 
     private var pointerStyle: BackportPointerStyle {
         switch direction {
@@ -163,17 +182,35 @@ private struct Divider: View {
                 .fill(color)
                 .frame(width: direction == .horizontal ? visibleSize : nil,
                        height: direction == .vertical ? visibleSize : nil)
+            Rectangle()
+                .fill(Color.accentColor.opacity(isDragging ? 0.9 : 0.6))
+                .frame(width: direction == .horizontal ? emphasizedSize : nil,
+                       height: direction == .vertical ? emphasizedSize : nil)
+                .opacity(isEmphasized ? 1 : 0)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isEmphasized)
         }
         .frame(width: direction == .horizontal ? invisibleSize : nil,
                height: direction == .vertical ? invisibleSize : nil)
         .contentShape(Rectangle())
         .backport.pointerStyle(pointerStyle)
+        .help("Drag to resize. Double-click to make splits equal.")
+        .accessibilityElement()
+        .accessibilityLabel("Split divider")
+        .accessibilityValue("\(Int((split * 100).rounded())) percent")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: split = min(0.9, split + 0.05)
+            case .decrement: split = max(0.1, split - 0.05)
+            @unknown default: break
+            }
+        }
         .onHover { hovering in
+            guard hovering != isHovering else { return }
+            isHovering = hovering
+            // macOS 15+ uses the pointerStyle modifier; older systems need the cursor stack.
             if #available(macOS 15, *) {
                 return
             }
-            guard hovering != isHovering else { return }
-            isHovering = hovering
             if hovering {
                 switch direction {
                 case .horizontal:
@@ -186,11 +223,11 @@ private struct Divider: View {
             }
         }
         .onDisappear {
+            guard isHovering else { return }
+            isHovering = false
             if #available(macOS 15, *) {
                 return
             }
-            guard isHovering else { return }
-            isHovering = false
             NSCursor.pop()
         }
     }

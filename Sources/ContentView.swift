@@ -820,17 +820,7 @@ struct TabItemView: View {
         }
         .onDrag {
             draggingTabId = tab.id
-            // Private, process-only type: dropping a tab onto the terminal (or another app)
-            // must not paste its UUID as text.
-            let provider = NSItemProvider()
-            provider.registerDataRepresentation(
-                forTypeIdentifier: UTType.cterSidebarTab.identifier,
-                visibility: .ownProcess
-            ) { completion in
-                completion(Data(tab.id.uuidString.utf8), nil)
-                return nil
-            }
-            return provider
+            return NSItemProvider.cterDragItem(tab.id, type: .cterSidebarTab)
         }
         .onDrop(
             of: [UTType.cterSidebarTab],
@@ -1161,8 +1151,33 @@ struct TabItemView: View {
     }
 }
 
-private extension UTType {
+/// Private, process-only drag types. Using these instead of plain text means a dragged tab
+/// dropped onto a terminal (or another app) never pastes its UUID.
+extension UTType {
     static let cterSidebarTab = UTType(importedAs: "com.cuonghx.cter.sidebar-tab")
+    static let cterPaneSurface = UTType(importedAs: "com.cuonghx.cter.pane-surface")
+}
+
+extension NSItemProvider {
+    /// Provider carrying `id` under a process-only `type`.
+    static func cterDragItem(_ id: UUID, type: UTType) -> NSItemProvider {
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(forTypeIdentifier: type.identifier, visibility: .ownProcess) { completion in
+            completion(Data(id.uuidString.utf8), nil)
+            return nil
+        }
+        return provider
+    }
+
+    /// Reads a UUID written by `cterDragItem`; `completion` runs on the main queue.
+    func loadCterDragItem(type: UTType, completion: @escaping (UUID) -> Void) {
+        _ = loadDataRepresentation(forTypeIdentifier: type.identifier) { data, _ in
+            guard let data,
+                  let string = String(data: data, encoding: .utf8),
+                  let id = UUID(uuidString: string) else { return }
+            DispatchQueue.main.async { completion(id) }
+        }
+    }
 }
 
 /// Live-reorders sidebar tabs while a row drag hovers over other rows. Only reacts to drags

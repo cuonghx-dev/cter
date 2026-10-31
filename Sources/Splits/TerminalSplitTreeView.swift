@@ -202,8 +202,8 @@ private struct PaneTabBar: View {
                             onSelect: { tab.selectSurface(surface.id) },
                             onClose: { closeSurface(surface.id) }
                         )
-                        .onDrag { NSItemProvider(object: surface.id.uuidString as NSString) }
-                        .onDrop(of: [.plainText], isTargeted: nil) { providers in
+                        .onDrag { NSItemProvider.cterDragItem(surface.id, type: .cterPaneSurface) }
+                        .onDrop(of: [.cterPaneSurface], isTargeted: nil) { providers in
                             reorder(providers: providers, onto: surface.id)
                         }
                     }
@@ -213,7 +213,7 @@ private struct PaneTabBar: View {
             Spacer(minLength: 4)
 
             HStack(spacing: 2) {
-                PaneBarButton(systemImage: "plus", help: "New Terminal") {
+                PaneBarButton(systemImage: "plus", help: "New Terminal (⌘T)") {
                     newSurface()
                 }
                 PaneBarButton(systemImage: "square.split.2x1", help: "Split Right") {
@@ -267,15 +267,12 @@ private struct PaneTabBar: View {
 
     private func reorder(providers: [NSItemProvider], onto targetId: UUID) -> Bool {
         guard let provider = providers.first else { return false }
-        _ = provider.loadObject(ofClass: NSString.self) { object, _ in
-            guard let string = object as? String, let draggedId = UUID(uuidString: string) else { return }
-            DispatchQueue.main.async {
-                guard draggedId != targetId,
-                      pane.contains(surfaceId: draggedId),
-                      let destination = pane.surfaces.firstIndex(where: { $0.id == targetId }) else { return }
-                withAnimation(.easeInOut(duration: 0.15)) {
-                    pane.move(surfaceId: draggedId, to: destination)
-                }
+        provider.loadCterDragItem(type: .cterPaneSurface) { draggedId in
+            guard draggedId != targetId,
+                  pane.contains(surfaceId: draggedId),
+                  let destination = pane.surfaces.firstIndex(where: { $0.id == targetId }) else { return }
+            withAnimation(.easeInOut(duration: 0.15)) {
+                pane.move(surfaceId: draggedId, to: destination)
             }
         }
         return true
@@ -292,6 +289,7 @@ private struct PaneTabItem: View {
     let onClose: () -> Void
 
     @State private var isHovering = false
+    @State private var isHoveringClose = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -313,13 +311,19 @@ private struct PaneTabItem: View {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 9, weight: .semibold))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(isHoveringClose ? .primary : .secondary)
                         .frame(width: 16, height: 16)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.primary.opacity(isHoveringClose ? 0.12 : 0))
+                        )
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .onHover { isHoveringClose = $0 }
                 .opacity(isHovering || isSelected ? 1 : 0)
                 .help("Close Terminal")
+                .accessibilityLabel("Close Terminal")
             }
             .frame(width: 16, height: 16)
         }
@@ -327,7 +331,7 @@ private struct PaneTabItem: View {
         .padding(.trailing, 6)
         .frame(minWidth: 90, idealWidth: 180, maxWidth: 220, maxHeight: .infinity)
         .fixedSize(horizontal: true, vertical: false)
-        .background(isSelected ? selectedBackground : Color.clear)
+        .background(isSelected ? selectedBackground : (isHovering ? Color.primary.opacity(0.05) : Color.clear))
         .overlay(alignment: .top) {
             if isSelected && isPaneFocused {
                 Rectangle()
@@ -342,10 +346,18 @@ private struct PaneTabItem: View {
         }
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
-        .onHover { isHovering = $0 }
+        .onHover { hovering in
+            isHovering = hovering
+            if !hovering { isHoveringClose = false }
+        }
         .contextMenu {
             Button("Close Terminal", action: onClose)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(hasUnread ? "\(title), unread" : title)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction { onSelect() }
+        .accessibilityAction(named: "Close Terminal") { onClose() }
     }
 }
 
@@ -371,6 +383,7 @@ private struct PaneBarButton: View {
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
         .help(help)
+        .accessibilityLabel(help)
     }
 }
 
