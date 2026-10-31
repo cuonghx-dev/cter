@@ -1234,11 +1234,13 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         super.setFrameSize(newSize)
         attachSurfaceIfNeeded()
         updateSurfaceSize()
+        invalidateTextInputCoordinates()
     }
 
     override func layout() {
         super.layout()
         attachSurfaceIfNeeded()
+        invalidateTextInputCoordinates()
     }
 
     override var isOpaque: Bool { false }
@@ -1316,6 +1318,93 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
 
     override var acceptsFirstResponder: Bool { true }
 
+    // MARK: - Accessibility
+
+    /// Expose the terminal as an editable text area; voice input tools target
+    /// AX text areas for text insertion.
+    override func isAccessibilityElement() -> Bool {
+        true
+    }
+
+    override func accessibilityRole() -> NSAccessibility.Role? {
+        .textArea
+    }
+
+    override func accessibilityHelp() -> String? {
+        "Terminal content area"
+    }
+
+    override func accessibilityValue() -> Any? {
+        // No full terminal text snapshot lives in this layer; expose the selection
+        // (or empty) so AX clients still treat this as an editable text area.
+        accessibilitySelectedText() ?? ""
+    }
+
+    override func setAccessibilityValue(_ value: Any?) {
+        let content: String
+        switch value {
+        case let v as NSAttributedString:
+            content = v.string
+        case let v as String:
+            content = v
+        default:
+            return
+        }
+        guard !content.isEmpty else { return }
+
+        let inject = {
+            self.insertText(content, replacementRange: NSRange(location: NSNotFound, length: 0))
+        }
+        if Thread.isMainThread {
+            inject()
+        } else {
+            DispatchQueue.main.async(execute: inject)
+        }
+    }
+
+    override func accessibilitySelectedTextRange() -> NSRange {
+        selectedRange()
+    }
+
+    override func accessibilitySelectedText() -> String? {
+        guard let snapshot = readSelectionSnapshot() else { return nil }
+        return snapshot.string.isEmpty ? nil : snapshot.string
+    }
+
+    fileprivate struct SelectionSnapshot {
+        let range: NSRange
+        let string: String
+        let topLeft: CGPoint
+    }
+
+    fileprivate func readSelectionSnapshot() -> SelectionSnapshot? {
+        guard let surface else { return nil }
+
+        var text = ghostty_text_s()
+        guard ghostty_surface_read_selection(surface, &text) else { return nil }
+        defer { ghostty_surface_free_text(surface, &text) }
+
+        let selected: String
+        if let ptr = text.text, text.text_len > 0 {
+            selected = String(decoding: Data(bytes: ptr, count: Int(text.text_len)), as: UTF8.self)
+        } else {
+            selected = ""
+        }
+        return SelectionSnapshot(
+            range: NSRange(location: Int(text.offset_start), length: Int(text.offset_len)),
+            string: selected,
+            topLeft: CGPoint(x: text.tl_px_x, y: text.tl_px_y)
+        )
+    }
+
+    fileprivate func invalidateTextInputCoordinates(selectionChanged: Bool = false) {
+        guard let inputContext else { return }
+        inputContext.invalidateCharacterCoordinates()
+        if #available(macOS 15.4, *), selectionChanged {
+            inputContext.textInputClientDidUpdateSelection()
+        }
+    }
+
     override func becomeFirstResponder() -> Bool {
         let result = super.becomeFirstResponder()
         if result, let surface = surface {
@@ -1344,6 +1433,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     // For NSTextInputClient - accumulates text during key events
     private var keyTextAccumulator: [String]? = nil
     private var markedText = NSMutableAttributedString()
+    private var markedSelectedRange = NSRange(location: 0, length: 0)
     // Set when interpretKeyEvents asks for deleteBackward: during the current keyDown.
     private var keyRequestedDeleteBackward = false
     private var lastPerformKeyEvent: TimeInterval?
@@ -1354,6 +1444,12 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         if keyTextAccumulator != nil, selector == #selector(deleteBackward(_:)) {
             keyRequestedDeleteBackward = true
         }
+    }
+
+    /// Some third-party voice input apps commit text through the responder-chain
+    /// `insertText:` action (single-argument form); route it into NSTextInputClient.
+    override func insertText(_ insertString: Any) {
+        insertText(insertString, replacementRange: NSRange(location: NSNotFound, length: 0))
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -2601,7 +2697,11 @@ extension GhosttyNSView: NSTextInputClient {
     }
 
     func selectedRange() -> NSRange {
-        return NSRange(location: NSNotFound, length: 0)
+        if markedText.length > 0 {
+            return markedSelectedRange
+        }
+        // Dictation and other text services need a real insertion point.
+        return readSelectionSnapshot()?.range ?? NSRange(location: 0, length: 0)
     }
 
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
@@ -2626,20 +2726,33 @@ extension GhosttyNSView: NSTextInputClient {
         } else {
             markedText = NSMutableAttributedString(attributedString: incoming)
         }
+        markedSelectedRange = Self.clampedMarkedSelection(selectedRange, markedLength: markedText.length)
 
         // If we're not in a keyDown event, sync preedit immediately.
         // This can happen due to external events like changing keyboard layouts
         // while composing.
         if keyTextAccumulator == nil {
             syncPreedit()
+            invalidateTextInputCoordinates(selectionChanged: true)
         }
     }
 
     func unmarkText() {
         if markedText.length > 0 {
             markedText.mutableString.setString("")
+            markedSelectedRange = NSRange(location: 0, length: 0)
             syncPreedit()
+            invalidateTextInputCoordinates(selectionChanged: true)
         }
+    }
+
+    private static func clampedMarkedSelection(_ range: NSRange, markedLength: Int) -> NSRange {
+        guard range.location != NSNotFound else {
+            return NSRange(location: markedLength, length: 0)
+        }
+        let location = min(max(range.location, 0), markedLength)
+        let length = min(max(range.length, 0), markedLength - location)
+        return NSRange(location: location, length: length)
     }
 
     /// String ID of the current keyboard input source.
@@ -2677,11 +2790,14 @@ extension GhosttyNSView: NSTextInputClient {
     }
 
     func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
-        return nil
+        guard range.length > 0,
+              let snapshot = readSelectionSnapshot() else { return nil }
+        actualRange?.pointee = snapshot.range
+        return NSAttributedString(string: snapshot.string)
     }
 
     func characterIndex(for point: NSPoint) -> Int {
-        return 0
+        return selectedRange().location
     }
 
     func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
@@ -2694,8 +2810,19 @@ extension GhosttyNSView: NSTextInputClient {
         var y: Double = 0
         var w: Double = cellSize.width
         var h: Double = cellSize.height
-        if let surface = surface {
+        if range.length > 0,
+           range != selectedRange(),
+           let snapshot = readSelectionSnapshot() {
+            // A text service asking about the selection, not the insertion point.
+            x = snapshot.topLeft.x - 2
+            y = snapshot.topLeft.y + 2
+        } else if let surface = surface {
             ghostty_surface_ime_point(surface, &x, &y, &w, &h)
+        }
+
+        if range.length == 0, w > 0 {
+            // Dictation expects a caret rect for insertion points rather than a box.
+            w = 0
         }
 
         // Ghostty coordinates are top-left origin; AppKit expects bottom-left.
@@ -2707,6 +2834,32 @@ extension GhosttyNSView: NSTextInputClient {
         )
         let winRect = convert(viewRect, to: nil)
         return window.convertToScreen(winRect)
+    }
+
+    func attributedString() -> NSAttributedString {
+        if markedText.length > 0 {
+            return NSAttributedString(attributedString: markedText)
+        }
+        if let snapshot = readSelectionSnapshot(), !snapshot.string.isEmpty {
+            return NSAttributedString(string: snapshot.string)
+        }
+        return NSAttributedString(string: "")
+    }
+
+    func windowLevel() -> Int {
+        Int(window?.level.rawValue ?? NSWindow.Level.normal.rawValue)
+    }
+
+    @available(macOS 14.0, *)
+    var unionRectInVisibleSelectedRange: NSRect {
+        firstRect(forCharacterRange: selectedRange(), actualRange: nil)
+    }
+
+    @available(macOS 14.0, *)
+    var documentVisibleRect: NSRect {
+        let windowRect = convert(visibleRect, to: nil)
+        guard let window else { return windowRect }
+        return window.convertToScreen(windowRect)
     }
 
     func insertText(_ string: Any, replacementRange: NSRange) {
@@ -2724,25 +2877,111 @@ extension GhosttyNSView: NSTextInputClient {
         // Clear marked text since we're inserting
         unmarkText()
 
+        // Some IME/input-method paths call insertText with an empty payload to
+        // flush state. There is no terminal text to send in that case.
+        guard !chars.isEmpty else { return }
+
         // If we have an accumulator, we're in a keyDown event - accumulate the text
         if keyTextAccumulator != nil {
             keyTextAccumulator?.append(chars)
             return
         }
 
-        // Otherwise send directly to the terminal
-        if let surface = surface {
-            chars.withCString { ptr in
-                var keyEvent = ghostty_input_key_s()
-                keyEvent.action = GHOSTTY_ACTION_PRESS
-                keyEvent.keycode = 0
-                keyEvent.mods = GHOSTTY_MODS_NONE
-                keyEvent.consumed_mods = GHOSTTY_MODS_NONE
-                keyEvent.text = ptr
-                keyEvent.composing = false
-                _ = ghostty_surface_key(surface, keyEvent)
+        // Text committed without a key event comes from dictation or accessibility
+        // tools, some of which prepend escape/control sequences.
+        let committed = NSApp.currentEvent == nil
+            ? Self.sanitizeExternalCommittedText(chars)
+            : chars
+        guard !committed.isEmpty else { return }
+
+        // Committed text goes through the paste-like text path, not key encoding.
+        if let surface = surface, let data = committed.data(using: .utf8), !data.isEmpty {
+            data.withUnsafeBytes { rawBuffer in
+                guard let baseAddress = rawBuffer.baseAddress?.assumingMemoryBound(to: CChar.self) else { return }
+                ghostty_surface_text(surface, baseAddress, UInt(rawBuffer.count))
             }
         }
+    }
+
+    /// Strip leading escape/control sequences that some external text tools
+    /// inject before plain text, so they can't leak into the PTY as literals.
+    static func sanitizeExternalCommittedText(_ text: String) -> String {
+        let bytes = Array(text.utf8)
+        var index = 0
+        while index < bytes.count {
+            let byte = bytes[index]
+            if byte == 0x1B {
+                index = consumeLeadingEscapeSequence(in: bytes, from: index)
+            } else if byte == 0x9B {
+                index = consumeLeadingCSISequence(in: bytes, from: index + 1)
+            } else if byte < 0x20 || byte == 0x7F {
+                index += 1
+            } else {
+                break
+            }
+        }
+
+        if index == 0 { return text }
+        guard index < bytes.count else { return "" }
+        return String(decoding: bytes[index...], as: UTF8.self)
+    }
+
+    private static func consumeLeadingEscapeSequence(in bytes: [UInt8], from start: Int) -> Int {
+        let next = start + 1
+        guard next < bytes.count else { return bytes.count }
+
+        switch bytes[next] {
+        case 0x5B:
+            // CSI: ESC [ ... final
+            return consumeLeadingCSISequence(in: bytes, from: next + 1)
+        case 0x4F:
+            // SS3: ESC O final
+            return min(bytes.count, next + 2)
+        case 0x50, 0x5D, 0x5E, 0x5F:
+            // DCS/OSC/PM/APC: consume until BEL/ST or EOF.
+            return consumeLeadingEscapedStringSequence(in: bytes, from: next + 1)
+        default:
+            // Single-character escape.
+            return min(bytes.count, next + 1)
+        }
+    }
+
+    private static func consumeLeadingCSISequence(in bytes: [UInt8], from start: Int) -> Int {
+        var index = start
+        while index < bytes.count {
+            let byte = bytes[index]
+            if (0x20...0x3F).contains(byte) {
+                index += 1
+                continue
+            }
+            if (0x40...0x7E).contains(byte) {
+                return index + 1
+            }
+            break
+        }
+        return index
+    }
+
+    private static func consumeLeadingEscapedStringSequence(in bytes: [UInt8], from start: Int) -> Int {
+        var index = start
+        while index < bytes.count {
+            let byte = bytes[index]
+            if byte == 0x07 {
+                return index + 1
+            }
+            if byte == 0x1B {
+                let next = index + 1
+                if next < bytes.count, bytes[next] == 0x5C {
+                    return next + 1
+                }
+                return index
+            }
+            if byte < 0x20 || byte == 0x7F {
+                return index + 1
+            }
+            index += 1
+        }
+        return bytes.count
     }
 }
 
