@@ -636,6 +636,21 @@ class TabManager: ObservableObject {
         tabs = selectedPinned + remainingPinned + selectedUnpinned + remainingUnpinned
     }
 
+    /// Moves a tab next to `targetId` (drag-and-drop reorder). Pinned and unpinned tabs stay
+    /// in their own groups, so a drop across the boundary clamps to the edge of the tab's group.
+    func moveTab(_ tabId: UUID, toPositionOf targetId: UUID) {
+        guard tabId != targetId,
+              let fromIndex = tabs.firstIndex(where: { $0.id == tabId }),
+              let targetIndex = tabs.firstIndex(where: { $0.id == targetId }) else { return }
+        let tab = tabs[fromIndex]
+        let pinnedCount = tabs.filter { $0.isPinned }.count
+        let groupRange = tab.isPinned ? 0...(pinnedCount - 1) : pinnedCount...(tabs.count - 1)
+        let destination = min(max(targetIndex, groupRange.lowerBound), groupRange.upperBound)
+        guard destination != fromIndex else { return }
+        tabs.remove(at: fromIndex)
+        tabs.insert(tab, at: destination)
+    }
+
     func setCustomTitle(tabId: UUID, title: String?) {
         guard let index = tabs.firstIndex(where: { $0.id == tabId }) else { return }
         tabs[index].setCustomTitle(title)

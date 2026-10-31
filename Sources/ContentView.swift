@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import ObjectiveC
+import UniformTypeIdentifiers
 
 /// NSVisualEffectView that never intercepts mouse events. Used for background
 /// blur inside contentView where SwiftUI may reorder it above interactive content.
@@ -438,6 +439,9 @@ struct VerticalTabsSidebar: View {
     /// Space at top of sidebar for traffic light buttons
     private let trafficLightPadding: CGFloat = 28
 
+    /// Tab currently being dragged for reorder; nil when no sidebar drag is in flight.
+    @State private var draggingTabId: UUID?
+
     var body: some View {
         GeometryReader { proxy in
             ScrollView {
@@ -453,7 +457,8 @@ struct VerticalTabsSidebar: View {
                                 index: index,
                                 selection: $selection,
                                 selectedTabIds: $selectedTabIds,
-                                lastSidebarSelectionIndex: $lastSidebarSelectionIndex
+                                lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
+                                draggingTabId: $draggingTabId
                             )
                         }
                     }
@@ -514,6 +519,7 @@ struct TabItemView: View {
     @Binding var selection: SidebarSelection
     @Binding var selectedTabIds: Set<UUID>
     @Binding var lastSidebarSelectionIndex: Int?
+    @Binding var draggingTabId: UUID?
     @State private var isHovering = false
     @State private var isHoveringClose = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -672,14 +678,45 @@ struct TabItemView: View {
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isHovering)
         )
         .padding(.horizontal, 6)
+        .opacity(draggingTabId == tab.id ? 0.5 : 1)
         .contentShape(Rectangle())
         .onTapGesture {
             updateSelection()
         }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { promptRename() })
         .onHover { hovering in
             isHovering = hovering
             if !hovering { isHoveringClose = false }
+            // SwiftUI has no drag-cancelled callback; clear stale drag state once the
+            // mouse is back over the sidebar with no button held.
+            if draggingTabId != nil, NSEvent.pressedMouseButtons == 0 {
+                draggingTabId = nil
+            }
         }
+        .onDrag {
+            draggingTabId = tab.id
+            // Private, process-only type: dropping a tab onto the terminal (or another app)
+            // must not paste its UUID as text.
+            let provider = NSItemProvider()
+            provider.registerDataRepresentation(
+                forTypeIdentifier: UTType.cterSidebarTab.identifier,
+                visibility: .ownProcess
+            ) { completion in
+                completion(Data(tab.id.uuidString.utf8), nil)
+                return nil
+            }
+            return provider
+        }
+        .onDrop(
+            of: [UTType.cterSidebarTab],
+            delegate: SidebarTabDropDelegate(
+                targetTabId: tab.id,
+                tabManager: tabManager,
+                draggingTabId: $draggingTabId,
+                onReorder: { syncSelectionAfterMutation() },
+                animate: !reduceMotion
+            )
+        )
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityTitle)
         .accessibilityAddTraits(isActive ? [.isButton, .isSelected] : .isButton)
@@ -995,6 +1032,46 @@ struct TabItemView: View {
         let response = alert.runModal()
         guard response == .alertFirstButtonReturn else { return }
         tabManager.setCustomTitle(tabId: tab.id, title: input.stringValue)
+    }
+}
+
+private extension UTType {
+    static let cterSidebarTab = UTType(importedAs: "com.cuonghx.cter.sidebar-tab")
+}
+
+/// Live-reorders sidebar tabs while a row drag hovers over other rows. Only reacts to drags
+/// that started in the sidebar, so text dropped from other apps is ignored.
+private struct SidebarTabDropDelegate: DropDelegate {
+    let targetTabId: UUID
+    let tabManager: TabManager
+    @Binding var draggingTabId: UUID?
+    let onReorder: () -> Void
+    let animate: Bool
+
+    func validateDrop(info: DropInfo) -> Bool {
+        draggingTabId != nil
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard let draggingTabId, draggingTabId != targetTabId else { return }
+        if animate {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                tabManager.moveTab(draggingTabId, toPositionOf: targetTabId)
+            }
+        } else {
+            tabManager.moveTab(draggingTabId, toPositionOf: targetTabId)
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: draggingTabId != nil ? .move : .forbidden)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        let handled = draggingTabId != nil
+        draggingTabId = nil
+        onReorder()
+        return handled
     }
 }
 
