@@ -808,6 +808,13 @@ class TabManager: ObservableObject {
         surface.applyWindowBackgroundIfActive()
     }
 
+    /// Returns keyboard focus to the selected tab's terminal (e.g. after editing in the sidebar).
+    func refocusSelectedSurface() {
+        DispatchQueue.main.async { [weak self] in
+            self?.focusSelectedTabSurface(previousTabId: nil)
+        }
+    }
+
     private func focusSelectedTabSurface(previousTabId: UUID?) {
         guard let selectedTabId,
               let tab = tabs.first(where: { $0.id == selectedTabId }) else { return }

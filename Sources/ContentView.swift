@@ -595,6 +595,9 @@ struct TabItemView: View {
     /// Keyboard shortcut label (e.g. "⌘3") shown while Command is held; nil hides it.
     var shortcutHint: String? = nil
     @State private var isHovering = false
+    @State private var isRenaming = false
+    @State private var renameText = ""
+    @FocusState private var renameFieldFocused: Bool
     @State private var isHoveringClose = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -638,11 +641,31 @@ struct TabItemView: View {
                         .foregroundColor(isActive ? .white.opacity(0.8) : .secondary)
                 }
 
-                Text(tab.title)
-                    .font(.system(size: 12))
-                    .foregroundColor(isActive ? .white : .primary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                if isRenaming {
+                    TextField("Tab name", text: $renameText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                        .foregroundColor(isActive ? .white : .primary)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(isActive ? Color.white.opacity(0.18) : Color.primary.opacity(0.08))
+                        )
+                        .focused($renameFieldFocused)
+                        .onSubmit { finishRename(commit: true) }
+                        .onExitCommand { finishRename(commit: false) }
+                        .onChange(of: renameFieldFocused) { focused in
+                            if !focused { finishRename(commit: true) }
+                        }
+                        .accessibilityLabel("Tab name")
+                } else {
+                    Text(tab.title)
+                        .font(.system(size: 12))
+                        .foregroundColor(isActive ? .white : .primary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
 
                 Spacer()
 
@@ -768,7 +791,11 @@ struct TabItemView: View {
         .onTapGesture {
             updateSelection()
         }
-        .simultaneousGesture(TapGesture(count: 2).onEnded { promptRename() })
+        .simultaneousGesture(TapGesture(count: 2).onEnded { startRename() })
+        .onChange(of: tabManager.selectedTabId) { _ in
+            // Switching tabs mid-edit keeps what was typed and hands focus back to the terminal.
+            if isRenaming { finishRename(commit: true) }
+        }
         .onHover { hovering in
             isHovering = hovering
             if !hovering { isHoveringClose = false }
@@ -823,7 +850,7 @@ struct TabItemView: View {
             }
 
             Button("Rename Tab…") {
-                promptRename()
+                startRename()
             }
 
             if tab.hasCustomTitle {
@@ -1098,25 +1125,26 @@ struct TabItemView: View {
         return trimmed
     }
 
-    private func promptRename() {
-        let alert = NSAlert()
-        alert.messageText = "Rename Tab"
-        alert.informativeText = "Enter a custom name for this tab."
-        let input = NSTextField(string: tab.customTitle ?? tab.title)
-        input.placeholderString = "Tab name"
-        input.frame = NSRect(x: 0, y: 0, width: 240, height: 22)
-        alert.accessoryView = input
-        alert.addButton(withTitle: "Rename")
-        alert.addButton(withTitle: "Cancel")
-        let alertWindow = alert.window
-        alertWindow.initialFirstResponder = input
+    private func startRename() {
+        guard !isRenaming else { return }
+        renameText = tab.customTitle ?? tab.title
+        isRenaming = true
+        // Focus after the field is in the hierarchy; the terminal's ensureFocus yields to an
+        // active field editor, so this is not stolen back by tab-selection focus retries.
         DispatchQueue.main.async {
-            alertWindow.makeFirstResponder(input)
-            input.selectText(nil)
+            renameFieldFocused = true
         }
-        let response = alert.runModal()
-        guard response == .alertFirstButtonReturn else { return }
-        tabManager.setCustomTitle(tabId: tab.id, title: input.stringValue)
+    }
+
+    private func finishRename(commit: Bool) {
+        guard isRenaming else { return }
+        isRenaming = false
+        renameFieldFocused = false
+        if commit {
+            // Empty input clears the custom name and falls back to the process title.
+            tabManager.setCustomTitle(tabId: tab.id, title: renameText)
+        }
+        tabManager.refocusSelectedSurface()
     }
 }
 

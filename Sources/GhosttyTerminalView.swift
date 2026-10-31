@@ -2701,6 +2701,11 @@ final class GhosttySurfaceScrollView: NSView {
             return
         }
 
+        // Don't steal focus from a text field the user is editing (e.g. inline tab rename).
+        if let editor = window.firstResponder as? NSTextView, editor.isFieldEditor {
+            return
+        }
+
         // Wait until the pane is visible and laid out before taking focus.
         guard isUsableForFocus else {
             scheduleFocusRetry(for: tabId, surfaceId: surfaceId, attempt: attempt)
