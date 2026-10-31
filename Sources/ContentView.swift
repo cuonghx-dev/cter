@@ -868,8 +868,7 @@ struct TabItemView: View {
     }
 
     private var directorySummaryText: String? {
-        guard let root = tab.splitTree.root else { return nil }
-        let surfaces = root.leaves()
+        let surfaces = tab.allSurfaces
         guard !surfaces.isEmpty else { return nil }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         var seen: Set<String> = []

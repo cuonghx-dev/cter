@@ -447,7 +447,7 @@ class TerminalController {
                 result = "ERROR: Tab not found"
                 return
             }
-            let surfaces = tab.splitTree.root?.leaves() ?? []
+            let surfaces = tab.allSurfaces
             let focusedId = tab.focusedSurfaceId
             let lines = surfaces.enumerated().map { index, surface in
                 let selected = surface.id == focusedId ? "*" : " "
@@ -478,7 +478,7 @@ class TerminalController {
             }
 
             if let index = Int(trimmed), index >= 0 {
-                let surfaces = tab.splitTree.root?.leaves() ?? []
+                let surfaces = tab.allSurfaces
                 guard index < surfaces.count else { return }
                 tabManager.focusSurface(tabId: tab.id, surfaceId: surfaces[index].id)
                 success = true
@@ -709,7 +709,7 @@ class TerminalController {
     }
 #endif
 
-    private func parseSplitDirection(_ value: String) -> SplitTree<TerminalSurface>.NewDirection? {
+    private func parseSplitDirection(_ value: String) -> SplitTree<TerminalPane>.NewDirection? {
         switch value.lowercased() {
         case "left", "l":
             return .left
@@ -754,7 +754,7 @@ class TerminalController {
         }
 
         if let index = Int(arg), index >= 0 {
-            let surfaces = tab.splitTree.root?.leaves() ?? []
+            let surfaces = tab.allSurfaces
             guard index < surfaces.count else { return nil }
             return surfaces[index].surface
         }
@@ -768,7 +768,7 @@ class TerminalController {
         }
 
         if let index = Int(arg), index >= 0 {
-            let surfaces = tab.splitTree.root?.leaves() ?? []
+            let surfaces = tab.allSurfaces
             guard index < surfaces.count else { return nil }
             return surfaces[index].id
         }
@@ -994,9 +994,9 @@ class TerminalController {
                 return
             }
             // Try focused surface first, fall back to first leaf in split tree
-            let termSurface = tab.focusedSurface ?? tab.splitTree.root?.leaves().first
+            let termSurface = tab.focusedSurface ?? tab.allSurfaces.first
             guard let termSurface else {
-                result = "ERROR: No terminal surface (focusedSurfaceId=\(tab.focusedSurfaceId?.uuidString ?? "nil"), root=\(tab.splitTree.root == nil ? "nil" : "exists"), leaves=\(tab.splitTree.root?.leaves().count ?? 0))"
+                result = "ERROR: No terminal surface (focusedSurfaceId=\(tab.focusedSurfaceId?.uuidString ?? "nil"), root=\(tab.splitTree.root == nil ? "nil" : "exists"), leaves=\(tab.allSurfaces.count))"
                 return
             }
             guard let surface = termSurface.surface else {
@@ -1600,7 +1600,7 @@ class TerminalController {
                 surfaceId = focused
             }
 
-            let validSurfaceIds = Set((tab.splitTree.root?.leaves() ?? []).map { $0.id })
+            let validSurfaceIds = Set((tab.allSurfaces).map { $0.id })
             tab.pruneSurfaceMetadata(validSurfaceIds: validSurfaceIds)
             guard validSurfaceIds.contains(surfaceId) else {
                 result = "ERROR: Panel not found '\(surfaceId.uuidString)'"
@@ -1649,7 +1649,7 @@ class TerminalController {
                 surfaceId = focused
             }
 
-            let validSurfaceIds = Set((tab.splitTree.root?.leaves() ?? []).map { $0.id })
+            let validSurfaceIds = Set((tab.allSurfaces).map { $0.id })
             tab.pruneSurfaceMetadata(validSurfaceIds: validSurfaceIds)
             guard validSurfaceIds.contains(surfaceId) else {
                 result = "ERROR: Panel not found '\(surfaceId.uuidString)'"
@@ -1675,7 +1675,7 @@ class TerminalController {
                 return
             }
 
-            let validSurfaceIds = Set((tab.splitTree.root?.leaves() ?? []).map { $0.id })
+            let validSurfaceIds = Set((tab.allSurfaces).map { $0.id })
             tab.pruneSurfaceMetadata(validSurfaceIds: validSurfaceIds)
 
             // If a panel is specified, clear only that surface's ports. Otherwise clear all.

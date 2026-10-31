@@ -77,7 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
             _ = tabManager.newSplit(tabId: tab.id, surfaceId: initialSurfaceId, direction: .right)
             guard let targetSurfaceId = tab.focusedSurfaceId else { return }
-            let otherSurfaceId = tab.splitTree.root?.leaves().first(where: { $0.id != targetSurfaceId })?.id
+            let otherSurfaceId = tab.allSurfaces.first(where: { $0.id != targetSurfaceId })?.id
             if let otherSurfaceId {
                 tab.focusedSurfaceId = otherSurfaceId
             }

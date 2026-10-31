@@ -23,16 +23,68 @@ struct SidebarLogEntry: Identifiable {
     let timestamp: Date
 }
 
+/// A leaf of a tab's split tree. Each pane holds one or more terminal surfaces shown as
+/// tabs in the pane's tab bar; only the selected surface is visible.
+final class TerminalPane: Identifiable, ObservableObject {
+    let id = UUID()
+    @Published private(set) var surfaces: [TerminalSurface]
+    @Published var selectedSurfaceId: UUID
+
+    init(surface: TerminalSurface) {
+        self.surfaces = [surface]
+        self.selectedSurfaceId = surface.id
+    }
+
+    var selectedSurface: TerminalSurface? {
+        surfaces.first(where: { $0.id == selectedSurfaceId }) ?? surfaces.first
+    }
+
+    func contains(surfaceId: UUID) -> Bool {
+        surfaces.contains(where: { $0.id == surfaceId })
+    }
+
+    /// Inserts a surface right after the selected one and selects it.
+    func insert(_ surface: TerminalSurface) {
+        let index = surfaces.firstIndex(where: { $0.id == selectedSurfaceId }).map { $0 + 1 } ?? surfaces.count
+        surfaces.insert(surface, at: index)
+        selectedSurfaceId = surface.id
+    }
+
+    /// Removes a surface. If it was selected, selects its right neighbor (or the left one at the end).
+    func remove(surfaceId: UUID) {
+        guard let index = surfaces.firstIndex(where: { $0.id == surfaceId }) else { return }
+        surfaces.remove(at: index)
+        guard selectedSurfaceId == surfaceId, !surfaces.isEmpty else { return }
+        selectedSurfaceId = surfaces[min(index, surfaces.count - 1)].id
+    }
+
+    func move(surfaceId: UUID, to destination: Int) {
+        guard let index = surfaces.firstIndex(where: { $0.id == surfaceId }) else { return }
+        let surface = surfaces.remove(at: index)
+        surfaces.insert(surface, at: max(0, min(destination, surfaces.count)))
+    }
+
+    func surfaceId(offsetFrom surfaceId: UUID, by offset: Int) -> UUID? {
+        guard surfaces.count > 1,
+              let index = surfaces.firstIndex(where: { $0.id == surfaceId }) else { return nil }
+        let count = surfaces.count
+        return surfaces[((index + offset) % count + count) % count].id
+    }
+}
+
 class Tab: Identifiable, ObservableObject {
     let id: UUID
     @Published var title: String
     @Published var customTitle: String?
     @Published var isPinned: Bool = false
     @Published var currentDirectory: String
-    @Published var splitTree: SplitTree<TerminalSurface>
+    @Published var splitTree: SplitTree<TerminalPane>
     @Published var focusedSurfaceId: UUID? {
         didSet {
             guard let focusedSurfaceId else { return }
+            if let pane = pane(containing: focusedSurfaceId), pane.selectedSurfaceId != focusedSurfaceId {
+                pane.selectedSurfaceId = focusedSurfaceId
+            }
             AppDelegate.shared?.tabManager?.rememberFocusedSurface(tabId: id, surfaceId: focusedSurfaceId)
             AppDelegate.shared?.tabManager?.focusedSurfaceTitleDidChange(tabId: id)
             NotificationCenter.default.post(
@@ -78,8 +130,21 @@ class Tab: Identifiable, ObservableObject {
             configTemplate: nil,
             workingDirectory: hasWorkingDirectory ? trimmedWorkingDirectory : nil
         )
-        self.splitTree = SplitTree(view: surface)
+        self.splitTree = SplitTree(view: TerminalPane(surface: surface))
         self.focusedSurfaceId = surface.id
+    }
+
+    var panes: [TerminalPane] {
+        splitTree.root?.leaves() ?? []
+    }
+
+    /// Every terminal surface in this tab, in split order then pane-tab order.
+    var allSurfaces: [TerminalSurface] {
+        panes.flatMap(\.surfaces)
+    }
+
+    func pane(containing surfaceId: UUID) -> TerminalPane? {
+        panes.first(where: { $0.contains(surfaceId: surfaceId) })
     }
 
     var focusedSurface: TerminalSurface? {
@@ -110,11 +175,18 @@ class Tab: Identifiable, ObservableObject {
     }
 
     func surface(for id: UUID) -> TerminalSurface? {
-        guard let node = splitTree.root?.find(id: id) else { return nil }
-        if case .leaf(let view) = node {
-            return view
+        allSurfaces.first(where: { $0.id == id })
+    }
+
+    /// Focuses a surface and moves keyboard focus to it (e.g. when a pane tab is clicked).
+    func selectSurface(_ surfaceId: UUID) {
+        guard let surface = surface(for: surfaceId) else { return }
+        let previous = focusedSurface
+        focusSurface(surfaceId)
+        guard previous !== surface else { return }
+        DispatchQueue.main.async {
+            surface.hostedView.moveFocus(from: previous?.hostedView)
         }
-        return nil
     }
 
     func focusSurface(_ id: UUID) {
@@ -159,7 +231,7 @@ class Tab: Identifiable, ObservableObject {
     }
 
     func pruneSurfaceMetadata(validSurfaceIds: Set<UUID>? = nil) {
-        let validIds = validSurfaceIds ?? Set((splitTree.root?.leaves() ?? []).map { $0.id })
+        let validIds = validSurfaceIds ?? Set(allSurfaces.map { $0.id })
 
         if surfaceDirectories.keys.contains(where: { !validIds.contains($0) }) {
             surfaceDirectories = surfaceDirectories.filter { validIds.contains($0.key) }
@@ -222,7 +294,7 @@ class Tab: Identifiable, ObservableObject {
         splitViewSize = size
     }
 
-    func updateSplitRatio(node: SplitTree<TerminalSurface>.Node, ratio: Double) {
+    func updateSplitRatio(node: SplitTree<TerminalPane>.Node, ratio: Double) {
         do {
             splitTree = try splitTree.replacing(node: node, with: node.resizing(to: ratio))
         } catch {
@@ -234,22 +306,25 @@ class Tab: Identifiable, ObservableObject {
         splitTree = splitTree.equalized()
     }
 
-    func newSplit(from surfaceId: UUID, direction: SplitTree<TerminalSurface>.NewDirection) -> TerminalSurface? {
-        guard let targetSurface = surface(for: surfaceId) else { return nil }
-        let inheritedConfig: ghostty_surface_config_s? = if let existing = targetSurface.surface {
-            ghostty_surface_inherited_config(existing, GHOSTTY_SURFACE_CONTEXT_SPLIT)
+    private func makeSurface(inheritingFrom surfaceId: UUID, context: ghostty_surface_context_e) -> TerminalSurface {
+        let inheritedConfig: ghostty_surface_config_s? = if let existing = surface(for: surfaceId)?.surface {
+            ghostty_surface_inherited_config(existing, context)
         } else {
             nil
         }
-
-        let newSurface = TerminalSurface(
+        return TerminalSurface(
             tabId: id,
-            context: GHOSTTY_SURFACE_CONTEXT_SPLIT,
+            context: context,
             configTemplate: inheritedConfig
         )
+    }
+
+    func newSplit(from surfaceId: UUID, direction: SplitTree<TerminalPane>.NewDirection) -> TerminalSurface? {
+        guard let targetPane = pane(containing: surfaceId) else { return nil }
+        let newSurface = makeSurface(inheritingFrom: surfaceId, context: GHOSTTY_SURFACE_CONTEXT_SPLIT)
 
         do {
-            splitTree = try splitTree.inserting(view: newSurface, at: targetSurface, direction: direction)
+            splitTree = try splitTree.inserting(view: TerminalPane(surface: newSurface), at: targetPane, direction: direction)
             focusedSurfaceId = newSurface.id
             return newSurface
         } catch {
@@ -257,10 +332,29 @@ class Tab: Identifiable, ObservableObject {
         }
     }
 
-    func moveFocus(from surfaceId: UUID, direction: SplitTree<TerminalSurface>.FocusDirection) -> Bool {
+    /// Opens a new terminal as a tab in the pane that contains `surfaceId`.
+    func newSurface(inPaneOf surfaceId: UUID) -> TerminalSurface? {
+        guard let targetPane = pane(containing: surfaceId) else { return nil }
+        let newSurface = makeSurface(inheritingFrom: surfaceId, context: GHOSTTY_SURFACE_CONTEXT_TAB)
+        targetPane.insert(newSurface)
+        focusedSurfaceId = newSurface.id
+        return newSurface
+    }
+
+    /// Selects the pane tab `offset` positions away from `surfaceId`, wrapping around.
+    func cycleSurface(inPaneOf surfaceId: UUID, by offset: Int) -> Bool {
+        guard let targetId = pane(containing: surfaceId)?.surfaceId(offsetFrom: surfaceId, by: offset) else {
+            return false
+        }
+        selectSurface(targetId)
+        return true
+    }
+
+    func moveFocus(from surfaceId: UUID, direction: SplitTree<TerminalPane>.FocusDirection) -> Bool {
         guard let root = splitTree.root,
-              let targetNode = root.find(id: surfaceId),
-              let nextSurface = splitTree.focusTarget(for: direction, from: targetNode) else {
+              let pane = pane(containing: surfaceId),
+              let targetNode = root.find(id: pane.id),
+              let nextSurface = splitTree.focusTarget(for: direction, from: targetNode)?.selectedSurface else {
             return false
         }
 
@@ -268,9 +362,10 @@ class Tab: Identifiable, ObservableObject {
         return true
     }
 
-    func resizeSplit(from surfaceId: UUID, direction: SplitTree<TerminalSurface>.Spatial.Direction, amount: UInt16) -> Bool {
+    func resizeSplit(from surfaceId: UUID, direction: SplitTree<TerminalPane>.Spatial.Direction, amount: UInt16) -> Bool {
         guard let root = splitTree.root,
-              let targetNode = root.find(id: surfaceId),
+              let pane = pane(containing: surfaceId),
+              let targetNode = root.find(id: pane.id),
               splitViewSize.width > 0,
               splitViewSize.height > 0 else {
             return false
@@ -291,7 +386,8 @@ class Tab: Identifiable, ObservableObject {
 
     func toggleZoom(on surfaceId: UUID) -> Bool {
         guard let root = splitTree.root,
-              let targetNode = root.find(id: surfaceId) else {
+              let pane = pane(containing: surfaceId),
+              let targetNode = root.find(id: pane.id) else {
             return false
         }
 
@@ -306,8 +402,8 @@ class Tab: Identifiable, ObservableObject {
     }
 
     private func findNextFocusTargetAfterClosing(
-        node: SplitTree<TerminalSurface>.Node
-    ) -> TerminalSurface? {
+        node: SplitTree<TerminalPane>.Node
+    ) -> TerminalPane? {
         guard let root = splitTree.root else { return nil }
 
         if root.leftmostLeaf() === node.leftmostLeaf() {
@@ -319,17 +415,29 @@ class Tab: Identifiable, ObservableObject {
 
     func closeSurface(_ surfaceId: UUID) -> Bool {
         guard let root = splitTree.root,
-              let targetNode = root.find(id: surfaceId) else {
+              let pane = pane(containing: surfaceId),
+              let targetNode = root.find(id: pane.id) else {
             return false
         }
 
         let oldFocusedSurface = focusedSurface
-        let shouldMoveFocus = if let focusedSurfaceId {
-            targetNode.find(id: focusedSurfaceId) != nil
-        } else {
-            false
+
+        // Closing one of several pane tabs keeps the pane and selects a neighbor tab.
+        if pane.surfaces.count > 1 {
+            let wasFocused = focusedSurfaceId == surfaceId
+            pane.remove(surfaceId: surfaceId)
+            pruneSurfaceMetadata()
+            if wasFocused, let nextSurface = pane.selectedSurface {
+                focusedSurfaceId = nextSurface.id
+                DispatchQueue.main.async {
+                    nextSurface.hostedView.moveFocus(from: oldFocusedSurface?.hostedView)
+                }
+            }
+            return true
         }
-        let nextFocus: TerminalSurface? = shouldMoveFocus
+
+        let shouldMoveFocus = focusedSurfaceId == surfaceId
+        let nextFocus: TerminalPane? = shouldMoveFocus
             ? findNextFocusTargetAfterClosing(node: targetNode)
             : nil
 
@@ -345,11 +453,11 @@ class Tab: Identifiable, ObservableObject {
         }
 
         if shouldMoveFocus {
-            focusedSurfaceId = nextFocus?.id
+            focusedSurfaceId = nextFocus?.selectedSurface?.id
         }
 
         if focusedSurfaceId == nil {
-            focusedSurfaceId = splitTree.root?.leftmostLeaf().id
+            focusedSurfaceId = splitTree.root?.leftmostLeaf().selectedSurface?.id
         }
 
         if !splitTree.isSplit {
@@ -641,7 +749,7 @@ class TabManager: ObservableObject {
     }
 
     private func closePanelWithConfirmation(tab: Tab, surfaceId: UUID) {
-        guard tab.splitTree.isSplit else {
+        guard tab.allSurfaces.count > 1 else {
             closeTabIfRunningProcess(tab)
             return
         }
@@ -650,7 +758,7 @@ class TabManager: ObservableObject {
         if surface?.needsConfirmClose() == true {
             guard confirmClose(
                 title: "Close panel?",
-                message: "This will close the current split panel in this tab."
+                message: "This will close the current terminal in this tab."
             ) else { return }
         }
 
@@ -663,8 +771,7 @@ class TabManager: ObservableObject {
     }
 
     private func tabNeedsConfirmClose(_ tab: Tab) -> Bool {
-        guard let root = tab.splitTree.root else { return false }
-        return root.leaves().contains { $0.needsConfirmClose() }
+        tab.allSurfaces.contains { $0.needsConfirmClose() }
     }
 
     func titleForTab(_ tabId: UUID) -> String? {
@@ -926,17 +1033,36 @@ class TabManager: ObservableObject {
         }
     }
 
-    func newSplit(tabId: UUID, surfaceId: UUID, direction: SplitTree<TerminalSurface>.NewDirection) -> UUID? {
+    func newSplit(tabId: UUID, surfaceId: UUID, direction: SplitTree<TerminalPane>.NewDirection) -> UUID? {
         guard let tab = tabs.first(where: { $0.id == tabId }) else { return nil }
         return tab.newSplit(from: surfaceId, direction: direction)?.id
     }
 
-    func moveSplitFocus(tabId: UUID, surfaceId: UUID, direction: SplitTree<TerminalSurface>.FocusDirection) -> Bool {
+    func newSurfaceInFocusedPane() {
+        guard let tab = selectedTab, let surfaceId = tab.focusedSurfaceId else { return }
+        let previous = tab.focusedSurface
+        guard let newSurface = tab.newSurface(inPaneOf: surfaceId) else { return }
+        DispatchQueue.main.async {
+            newSurface.hostedView.moveFocus(from: previous?.hostedView)
+        }
+    }
+
+    func selectNextSurfaceInPane() {
+        guard let tab = selectedTab, let surfaceId = tab.focusedSurfaceId else { return }
+        _ = tab.cycleSurface(inPaneOf: surfaceId, by: 1)
+    }
+
+    func selectPreviousSurfaceInPane() {
+        guard let tab = selectedTab, let surfaceId = tab.focusedSurfaceId else { return }
+        _ = tab.cycleSurface(inPaneOf: surfaceId, by: -1)
+    }
+
+    func moveSplitFocus(tabId: UUID, surfaceId: UUID, direction: SplitTree<TerminalPane>.FocusDirection) -> Bool {
         guard let tab = tabs.first(where: { $0.id == tabId }) else { return false }
         return tab.moveFocus(from: surfaceId, direction: direction)
     }
 
-    func resizeSplit(tabId: UUID, surfaceId: UUID, direction: SplitTree<TerminalSurface>.Spatial.Direction, amount: UInt16) -> Bool {
+    func resizeSplit(tabId: UUID, surfaceId: UUID, direction: SplitTree<TerminalPane>.Spatial.Direction, amount: UInt16) -> Bool {
         guard let tab = tabs.first(where: { $0.id == tabId }) else { return false }
         return tab.resizeSplit(from: surfaceId, direction: direction, amount: amount)
     }
@@ -968,7 +1094,7 @@ class TabManager: ObservableObject {
                     context: GHOSTTY_SURFACE_CONTEXT_TAB,
                     configTemplate: nil
                 )
-                tab.splitTree = SplitTree(view: newSurface)
+                tab.splitTree = SplitTree(view: TerminalPane(surface: newSurface))
                 tab.focusSurface(newSurface.id)
             }
         }

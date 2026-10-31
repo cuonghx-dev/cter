@@ -141,8 +141,8 @@ struct cterApp: App {
 
             // New tab commands
             CommandGroup(replacing: .newItem) {
-                Button("New Tab") {
-                    tabManager.addTab()
+                Button("New Terminal in Pane") {
+                    tabManager.newSurfaceInFocusedPane()
                 }
                 .keyboardShortcut("t", modifiers: .command)
 
@@ -235,13 +235,13 @@ struct cterApp: App {
                 }
                 .keyboardShortcut("]", modifiers: .command)
 
-                Button("Next Tab") {
-                    tabManager.selectNextTab()
+                Button("Next Terminal in Pane") {
+                    tabManager.selectNextSurfaceInPane()
                 }
                 .keyboardShortcut(.tab, modifiers: .control)
 
-                Button("Previous Tab") {
-                    tabManager.selectPreviousTab()
+                Button("Previous Terminal in Pane") {
+                    tabManager.selectPreviousSurfaceInPane()
                 }
                 .keyboardShortcut(.tab, modifiers: [.control, .shift])
 

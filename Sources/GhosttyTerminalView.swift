@@ -318,7 +318,7 @@ class GhosttyApp {
         return DispatchQueue.main.sync(execute: work)
     }
 
-    private func splitDirection(from direction: ghostty_action_split_direction_e) -> SplitTree<TerminalSurface>.NewDirection? {
+    private func splitDirection(from direction: ghostty_action_split_direction_e) -> SplitTree<TerminalPane>.NewDirection? {
         switch direction {
         case GHOSTTY_SPLIT_DIRECTION_RIGHT: return .right
         case GHOSTTY_SPLIT_DIRECTION_LEFT: return .left
@@ -328,7 +328,7 @@ class GhosttyApp {
         }
     }
 
-    private func focusDirection(from direction: ghostty_action_goto_split_e) -> SplitTree<TerminalSurface>.FocusDirection? {
+    private func focusDirection(from direction: ghostty_action_goto_split_e) -> SplitTree<TerminalPane>.FocusDirection? {
         switch direction {
         case GHOSTTY_GOTO_SPLIT_PREVIOUS: return .previous
         case GHOSTTY_GOTO_SPLIT_NEXT: return .next
@@ -340,7 +340,7 @@ class GhosttyApp {
         }
     }
 
-    private func resizeDirection(from direction: ghostty_action_resize_split_direction_e) -> SplitTree<TerminalSurface>.Spatial.Direction? {
+    private func resizeDirection(from direction: ghostty_action_resize_split_direction_e) -> SplitTree<TerminalPane>.Spatial.Direction? {
         switch direction {
         case GHOSTTY_RESIZE_SPLIT_UP: return .up
         case GHOSTTY_RESIZE_SPLIT_DOWN: return .down
