@@ -686,6 +686,8 @@ struct CTERCLI {
 @main
 struct CTERMain {
     static func main() {
+        // CLI tools should ignore SIGPIPE so closed stdout pipes do not terminate the process.
+        _ = signal(SIGPIPE, SIG_IGN)
         let cli = CTERCLI(args: CommandLine.arguments)
         do {
             try cli.run()

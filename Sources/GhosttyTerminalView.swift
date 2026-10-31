@@ -5,6 +5,7 @@ import Metal
 import QuartzCore
 import Combine
 import Darwin
+import Carbon
 
 private enum GhosttyPasteboardHelper {
     private static let selectionPasteboard = NSPasteboard(
@@ -750,6 +751,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
         // If already attached to this view, nothing to do
         if attachedView === view && surface != nil {
             updateMetalLayer(for: view)
+            refreshForCurrentDisplay()
             return
         }
 
@@ -917,7 +919,25 @@ final class TerminalSurface: Identifiable, ObservableObject {
             UInt32(view.bounds.width * scaleFactors.x),
             UInt32(view.bounds.height * scaleFactors.y)
         )
+        // Ghostty needs the display id to drive vsync. Without it the renderer can believe
+        // vsync is running but never deliver frames, which looks like a frozen terminal.
+        assertDisplayID(for: view)
         ghostty_surface_refresh(surface)
+    }
+
+    /// Reassert the display id and force a redraw. Used after the view is reparented
+    /// (split churn) when its size is unchanged, so no resize-driven refresh happens.
+    func refreshForCurrentDisplay() {
+        guard let surface, let view = attachedView, view.window != nil else { return }
+        assertDisplayID(for: view)
+        ghostty_surface_refresh(surface)
+    }
+
+    private func assertDisplayID(for view: GhosttyNSView) {
+        guard let surface,
+              let displayID = (view.window?.screen ?? NSScreen.main)?.displayID,
+              displayID != 0 else { return }
+        ghostty_surface_set_display_id(surface, displayID)
     }
 
     private func updateMetalLayer(for view: GhosttyNSView) {
@@ -952,6 +972,12 @@ final class TerminalSurface: Identifiable, ObservableObject {
     func setFocus(_ focused: Bool) {
         guard let surface = surface else { return }
         ghostty_surface_set_focus(surface, focused)
+
+        // Focusing a surface while it is being reparented can start Ghostty's display link
+        // before the display id is valid. Reasserting it after focus restarts the link.
+        if let view = attachedView, view.window != nil {
+            assertDisplayID(for: view)
+        }
     }
 
     func needsConfirmClose() -> Bool {
@@ -1148,6 +1174,8 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             }
             attachSurfaceIfNeeded()
             updateSurfaceSize()
+            // Force a redraw even when the size is unchanged (e.g. after split reparenting).
+            terminalSurface?.refreshForCurrentDisplay()
             applySurfaceBackground()
             applyWindowBackgroundIfActive()
         }
@@ -1288,6 +1316,13 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         guard event.type == .keyDown else { return false }
         guard window?.firstResponder === self else { return false }
         guard let surface = surface else { return false }
+
+        // If the IME is composing (marked text present), don't intercept key
+        // events for bindings — let them flow through to keyDown so the input
+        // method can process them normally.
+        if hasMarkedText() {
+            return false
+        }
 
         // Check if this event matches a Ghostty keybinding.
         let bindingFlags: ghostty_binding_flags_e? = {
@@ -1432,8 +1467,28 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         keyTextAccumulator = []
         defer { keyTextAccumulator = nil }
 
+        // Track whether we had marked text (IME preedit) before this event,
+        // so we can detect when composition ends.
+        let markedTextBefore = markedText.length > 0
+
+        // Capture the keyboard layout ID before interpretation so we can
+        // detect if an IME changed it (e.g. toggling input methods).
+        // We only check when not already in a preedit state.
+        let keyboardIdBefore: String? = markedTextBefore ? nil : Self.currentKeyboardLayoutID
+
         // Let the input system handle the event (for IME, dead keys, etc.)
         interpretKeyEvents([translationEvent])
+
+        // If the keyboard layout changed, an input method grabbed the event.
+        // Sync preedit and return without sending the key to Ghostty.
+        if let keyboardIdBefore, keyboardIdBefore != Self.currentKeyboardLayoutID {
+            syncPreedit(clearIfNeeded: markedTextBefore)
+            return
+        }
+
+        // Sync the preedit state with Ghostty so it can render the IME
+        // composition overlay.
+        syncPreedit(clearIfNeeded: markedTextBefore)
 
         // Build the key event
         var keyEvent = ghostty_input_key_s()
@@ -1442,11 +1497,20 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         keyEvent.mods = modsFromEvent(event)
         // Control and Command never contribute to text translation
         keyEvent.consumed_mods = consumedModsFromFlags(translationMods)
-        keyEvent.composing = markedText.length > 0
         keyEvent.unshifted_codepoint = unshiftedCodepointFromEvent(event)
+
+        // We're composing if we have preedit (the obvious case). But we're also
+        // composing if we don't have preedit and we had marked text before,
+        // because this input probably just reset the preedit state. It shouldn't
+        // be encoded. Example: Japanese begin composing, then press backspace.
+        // This should only cancel the composing state but not actually delete
+        // the prior input characters (prior to the composing).
+        keyEvent.composing = markedText.length > 0 || markedTextBefore
 
         // Use accumulated text from insertText (for IME), or compute text for key
         if let accumulated = keyTextAccumulator, !accumulated.isEmpty {
+            // Accumulated text is the result of a composition, never composing.
+            keyEvent.composing = false
             for text in accumulated {
                 if shouldSendText(text) {
                     text.withCString { ptr in
@@ -2348,10 +2412,50 @@ extension GhosttyNSView: NSTextInputClient {
         default:
             break
         }
+
+        // If we're not in a keyDown event, sync preedit immediately.
+        // This can happen due to external events like changing keyboard layouts
+        // while composing.
+        if keyTextAccumulator == nil {
+            syncPreedit()
+        }
     }
 
     func unmarkText() {
-        markedText.mutableString.setString("")
+        if markedText.length > 0 {
+            markedText.mutableString.setString("")
+            syncPreedit()
+        }
+    }
+
+    /// String ID of the current keyboard input source.
+    fileprivate static var currentKeyboardLayoutID: String? {
+        guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
+              let sourceIdPointer = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else {
+            return nil
+        }
+        return Unmanaged<CFString>.fromOpaque(sourceIdPointer).takeUnretainedValue() as String
+    }
+
+    /// Sync the preedit state based on the markedText value to libghostty
+    /// so it can render the IME composition overlay.
+    private func syncPreedit(clearIfNeeded: Bool = true) {
+        guard let surface = surface else { return }
+
+        if markedText.length > 0 {
+            let str = markedText.string
+            let len = str.utf8CString.count
+            if len > 0 {
+                str.withCString { ptr in
+                    // Subtract 1 for the null terminator
+                    ghostty_surface_preedit(surface, ptr, UInt(len - 1))
+                }
+            }
+        } else if clearIfNeeded {
+            // If we had marked text before but don't now, we're no longer
+            // in a preedit state so we can clear it.
+            ghostty_surface_preedit(surface, nil, 0)
+        }
     }
 
     func validAttributesForMarkedText() -> [NSAttributedString.Key] {
@@ -2370,7 +2474,23 @@ extension GhosttyNSView: NSTextInputClient {
         guard let window = self.window else {
             return NSRect(x: frame.origin.x, y: frame.origin.y, width: 0, height: 0)
         }
-        let viewRect = NSRect(x: 0, y: 0, width: 0, height: 0)
+
+        // Use Ghostty's IME point API for accurate cursor position.
+        var x: Double = 0
+        var y: Double = 0
+        var w: Double = 0
+        var h: Double = 0
+        if let surface = surface {
+            ghostty_surface_ime_point(surface, &x, &y, &w, &h)
+        }
+
+        // Ghostty coordinates are top-left origin; AppKit expects bottom-left.
+        let viewRect = NSRect(
+            x: x,
+            y: frame.size.height - y,
+            width: 0,
+            height: max(h, cellSize.height)
+        )
         let winRect = convert(viewRect, to: nil)
         return window.convertToScreen(winRect)
     }

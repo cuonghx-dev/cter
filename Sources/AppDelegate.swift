@@ -173,6 +173,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard let chars = event.charactersIgnoringModifiers?.lowercased() else { return false }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
+        // When the terminal has active IME composition (e.g. Vietnamese, Korean, Japanese,
+        // Chinese input), don't intercept key events — let them flow through to the input method.
+        if let ghosttyView = NSApp.keyWindow?.firstResponder as? GhosttyNSView,
+           ghosttyView.hasMarkedText() {
+            return false
+        }
+
         // Check Show Notifications shortcut
         let notifShortcut = KeyboardShortcutSettings.showNotificationsShortcut()
         if chars == notifShortcut.key && flags == notifShortcut.modifierFlags {
