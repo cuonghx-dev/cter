@@ -149,6 +149,10 @@ private struct TerminalPaneView: View {
     let onFocus: (UUID) -> Void
     let onTriggerFlash: (UUID) -> Void
 
+    @ObservedObject private var dragState = SurfaceDragState.shared
+    @State private var contentSize: CGSize = .zero
+    @State private var dropZone: PaneDropZone?
+
     var body: some View {
         VStack(spacing: 0) {
             PaneTabBar(
@@ -175,7 +179,231 @@ private struct TerminalPaneView: View {
                     .allowsHitTesting(isSelected)
                 }
             }
+            .background(GeometryReader { proxy in
+                Color.clear
+                    .onAppear { contentSize = proxy.size }
+                    .onChange(of: proxy.size) { contentSize = $0 }
+            })
+            .overlay {
+                if let dropZone {
+                    PaneDropOverlay(zone: dropZone)
+                }
+            }
+            .animation(.easeOut(duration: 0.12), value: dropZone)
+            .onDrop(
+                of: [.cterPaneSurface],
+                delegate: PaneSurfaceDropDelegate(
+                    tabId: tab.id,
+                    paneId: pane.id,
+                    size: contentSize,
+                    zone: $dropZone
+                )
+            )
         }
+        .onChange(of: dragState.surfaceId) { if $0 == nil { dropZone = nil } }
+    }
+}
+
+// MARK: - Pane tab drag and drop
+
+/// Tracks the pane tab (terminal surface) being dragged so drop targets can preview and
+/// validate synchronously; item providers only load asynchronously. SwiftUI reports no drag
+/// cancellation, so the state clears itself once the mouse button has been released.
+final class SurfaceDragState: ObservableObject {
+    static let shared = SurfaceDragState()
+
+    @Published private(set) var surfaceId: UUID?
+    private var timer: Timer?
+    private var releasedTicks = 0
+
+    func begin(_ surfaceId: UUID) {
+        self.surfaceId = surfaceId
+        releasedTicks = 0
+        timer?.invalidate()
+        let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            // Wait a couple of ticks after release so an in-flight drop can still read the id.
+            if NSEvent.pressedMouseButtons == 0 {
+                self.releasedTicks += 1
+                if self.releasedTicks >= 2 { self.end() }
+            } else {
+                self.releasedTicks = 0
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    func end() {
+        timer?.invalidate()
+        timer = nil
+        if surfaceId != nil { surfaceId = nil }
+    }
+
+    /// The dragged surface id: from the live drag state, else loaded from the drop's item provider.
+    func resolve(_ info: DropInfo, completion: @escaping (UUID) -> Void) {
+        if let surfaceId {
+            completion(surfaceId)
+            return
+        }
+        info.itemProviders(for: [.cterPaneSurface]).first?
+            .loadCterDragItem(type: .cterPaneSurface, completion: completion)
+    }
+
+    /// Whether a drop is meaningful; optimistic when the dragged id isn't known yet.
+    func allows(_ destination: SurfaceDropDestination) -> Bool {
+        guard let surfaceId else { return true }
+        return AppDelegate.shared?.tabManager?.canMoveSurface(surfaceId, to: destination) ?? false
+    }
+
+    func perform(_ info: DropInfo, destination: SurfaceDropDestination) {
+        resolve(info) { surfaceId in
+            AppDelegate.shared?.tabManager?.moveSurface(surfaceId, to: destination)
+        }
+        end()
+    }
+}
+
+/// Where over a terminal a dragged pane tab will land: an edge splits, the center joins the pane.
+enum PaneDropZone: Equatable {
+    case center, left, right, top, bottom
+
+    /// Edges claim the outer quarter of each side; whichever edge is nearest wins.
+    init(location: CGPoint, size: CGSize) {
+        guard size.width > 0, size.height > 0 else {
+            self = .center
+            return
+        }
+        let x = location.x / size.width
+        let y = location.y / size.height
+        let distances: [(PaneDropZone, CGFloat)] = [(.left, x), (.right, 1 - x), (.top, y), (.bottom, 1 - y)]
+        let nearest = distances.min(by: { $0.1 < $1.1 })!
+        self = nearest.1 < 0.25 ? nearest.0 : .center
+    }
+
+    func destination(tabId: UUID, paneId: UUID) -> SurfaceDropDestination {
+        switch self {
+        case .center: .pane(tabId: tabId, paneId: paneId, index: nil)
+        case .left: .split(tabId: tabId, paneId: paneId, direction: .left)
+        case .right: .split(tabId: tabId, paneId: paneId, direction: .right)
+        case .top: .split(tabId: tabId, paneId: paneId, direction: .up)
+        case .bottom: .split(tabId: tabId, paneId: paneId, direction: .down)
+        }
+    }
+}
+
+private struct PaneSurfaceDropDelegate: DropDelegate {
+    let tabId: UUID
+    let paneId: UUID
+    let size: CGSize
+    @Binding var zone: PaneDropZone?
+
+    private var dragState: SurfaceDragState { .shared }
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.cterPaneSurface])
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        let candidate = PaneDropZone(location: info.location, size: size)
+        let allowed = dragState.allows(candidate.destination(tabId: tabId, paneId: paneId))
+        let newZone = allowed ? candidate : nil
+        if zone != newZone { zone = newZone }
+        return DropProposal(operation: allowed ? .move : .forbidden)
+    }
+
+    func dropExited(info: DropInfo) {
+        zone = nil
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        let candidate = PaneDropZone(location: info.location, size: size)
+        zone = nil
+        let destination = candidate.destination(tabId: tabId, paneId: paneId)
+        guard dragState.allows(destination) else {
+            dragState.end()
+            return false
+        }
+        dragState.perform(info, destination: destination)
+        return true
+    }
+}
+
+/// Translucent preview of the region a dropped pane tab will occupy.
+private struct PaneDropOverlay: View {
+    let zone: PaneDropZone
+
+    var body: some View {
+        GeometryReader { proxy in
+            let rect = previewRect(in: proxy.size)
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.accentColor.opacity(0.18))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(Color.accentColor.opacity(0.85), lineWidth: 2)
+                )
+                .frame(width: rect.width, height: rect.height)
+                .offset(x: rect.minX, y: rect.minY)
+        }
+        .padding(4)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func previewRect(in size: CGSize) -> CGRect {
+        let halfW = size.width / 2
+        let halfH = size.height / 2
+        switch zone {
+        case .center: return CGRect(origin: .zero, size: size)
+        case .left: return CGRect(x: 0, y: 0, width: halfW, height: size.height)
+        case .right: return CGRect(x: halfW, y: 0, width: halfW, height: size.height)
+        case .top: return CGRect(x: 0, y: 0, width: size.width, height: halfH)
+        case .bottom: return CGRect(x: 0, y: halfH, width: size.width, height: halfH)
+        }
+    }
+}
+
+/// Drop target for one pane tab: the left half inserts before it, the right half after it.
+private struct PaneTabDropDelegate: DropDelegate {
+    let tabId: UUID
+    let paneId: UUID
+    let index: Int
+    let width: CGFloat
+    @Binding var insertionIndex: Int?
+
+    private var dragState: SurfaceDragState { .shared }
+
+    private func target(_ info: DropInfo) -> Int {
+        info.location.x > width / 2 ? index + 1 : index
+    }
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.cterPaneSurface])
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        let target = target(info)
+        let allowed = dragState.allows(.pane(tabId: tabId, paneId: paneId, index: target))
+        let newValue = allowed ? target : nil
+        if insertionIndex != newValue { insertionIndex = newValue }
+        return DropProposal(operation: allowed ? .move : .forbidden)
+    }
+
+    func dropExited(info: DropInfo) {
+        insertionIndex = nil
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        let destination = SurfaceDropDestination.pane(tabId: tabId, paneId: paneId, index: target(info))
+        insertionIndex = nil
+        guard dragState.allows(destination) else {
+            dragState.end()
+            return false
+        }
+        withAnimation(.easeInOut(duration: 0.15)) {
+            dragState.perform(info, destination: destination)
+        }
+        return true
     }
 }
 
@@ -185,32 +413,27 @@ private struct PaneTabBar: View {
     let isPaneFocused: Bool
     let notificationStore: TerminalNotificationStore
 
+    @ObservedObject private var dragState = SurfaceDragState.shared
+    /// Where a hovering pane-tab drag would be inserted; drives the insertion marker.
+    @State private var insertionIndex: Int?
+    @State private var itemWidths: [UUID: CGFloat] = [:]
+
     static let height: CGFloat = 28
 
     var body: some View {
         let background = Color(nsColor: GhosttyApp.shared.defaultBackgroundColor)
         HStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 0) {
-                    ForEach(pane.surfaces) { surface in
-                        PaneTabItem(
-                            title: title(for: surface),
-                            isSelected: surface.id == pane.selectedSurfaceId,
-                            isPaneFocused: isPaneFocused,
-                            hasUnread: notificationStore.hasUnreadNotification(forTabId: tab.id, surfaceId: surface.id),
-                            selectedBackground: background,
-                            onSelect: { tab.selectSurface(surface.id) },
-                            onClose: { closeSurface(surface.id) }
-                        )
-                        .onDrag { NSItemProvider.cterDragItem(surface.id, type: .cterPaneSurface) }
-                        .onDrop(of: [.cterPaneSurface], isTargeted: nil) { providers in
-                            reorder(providers: providers, onto: surface.id)
+            GeometryReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 0) {
+                        ForEach(Array(pane.surfaces.enumerated()), id: \.element.id) { index, surface in
+                            tabItem(surface: surface, index: index, background: background)
                         }
+                        trailingDropArea
                     }
+                    .frame(minWidth: proxy.size.width, maxHeight: .infinity, alignment: .leading)
                 }
             }
-
-            Spacer(minLength: 4)
 
             HStack(spacing: 2) {
                 PaneBarButton(systemImage: "plus", help: "New Terminal (⌘T)") {
@@ -223,6 +446,7 @@ private struct PaneTabBar: View {
                     split(.down)
                 }
             }
+            .padding(.leading, 4)
             .padding(.trailing, 6)
         }
         .frame(height: Self.height)
@@ -234,6 +458,77 @@ private struct PaneTabBar: View {
                 .fill(Color.primary.opacity(0.12))
                 .frame(height: 1)
         }
+        .onChange(of: dragState.surfaceId) { if $0 == nil { insertionIndex = nil } }
+    }
+
+    @ViewBuilder
+    private func tabItem(surface: TerminalSurface, index: Int, background: Color) -> some View {
+        PaneTabItem(
+            title: title(for: surface),
+            isSelected: surface.id == pane.selectedSurfaceId,
+            isPaneFocused: isPaneFocused,
+            hasUnread: notificationStore.hasUnreadNotification(forTabId: tab.id, surfaceId: surface.id),
+            selectedBackground: background,
+            onSelect: { tab.selectSurface(surface.id) },
+            onClose: { closeSurface(surface.id) },
+            moveTargets: moveTargets,
+            canMoveToNewTab: tab.allSurfaces.count > 1,
+            onMove: { destination in
+                AppDelegate.shared?.tabManager?.moveSurface(surface.id, to: destination)
+            }
+        )
+        .opacity(dragState.surfaceId == surface.id ? 0.45 : 1)
+        .background(GeometryReader { proxy in
+            Color.clear
+                .onAppear { itemWidths[surface.id] = proxy.size.width }
+                .onChange(of: proxy.size.width) { itemWidths[surface.id] = $0 }
+        })
+        .overlay(alignment: .leading) {
+            if insertionIndex == index { InsertionMarker() }
+        }
+        .overlay(alignment: .trailing) {
+            if insertionIndex == index + 1 && index == pane.surfaces.count - 1 { InsertionMarker() }
+        }
+        .onDrag {
+            SurfaceDragState.shared.begin(surface.id)
+            return NSItemProvider.cterDragItem(surface.id, type: .cterPaneSurface)
+        }
+        .onDrop(
+            of: [.cterPaneSurface],
+            delegate: PaneTabDropDelegate(
+                tabId: tab.id,
+                paneId: pane.id,
+                index: index,
+                width: itemWidths[surface.id] ?? 0,
+                insertionIndex: $insertionIndex
+            )
+        )
+    }
+
+    /// Empty bar space after the last tab: drops append, double-click opens a terminal.
+    private var trailingDropArea: some View {
+        Color.clear
+            .frame(minWidth: 24, maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { newSurface() }
+            .onDrop(
+                of: [.cterPaneSurface],
+                delegate: PaneTabDropDelegate(
+                    tabId: tab.id,
+                    paneId: pane.id,
+                    index: pane.surfaces.count,
+                    width: .infinity,
+                    insertionIndex: $insertionIndex
+                )
+            )
+    }
+
+    /// Other sidebar tabs a pane tab can be sent to from its context menu.
+    private var moveTargets: [(id: UUID, title: String)] {
+        guard let tabManager = AppDelegate.shared?.tabManager else { return [] }
+        return tabManager.tabs
+            .filter { $0.id != tab.id }
+            .map { (id: $0.id, title: $0.title) }
     }
 
     private func title(for surface: TerminalSurface) -> String {
@@ -264,18 +559,17 @@ private struct PaneTabBar: View {
     private func closeSurface(_ surfaceId: UUID) {
         AppDelegate.shared?.tabManager?.closePanelWithConfirmation(tabId: tab.id, surfaceId: surfaceId)
     }
+}
 
-    private func reorder(providers: [NSItemProvider], onto targetId: UUID) -> Bool {
-        guard let provider = providers.first else { return false }
-        provider.loadCterDragItem(type: .cterPaneSurface) { draggedId in
-            guard draggedId != targetId,
-                  pane.contains(surfaceId: draggedId),
-                  let destination = pane.surfaces.firstIndex(where: { $0.id == targetId }) else { return }
-            withAnimation(.easeInOut(duration: 0.15)) {
-                pane.move(surfaceId: draggedId, to: destination)
-            }
-        }
-        return true
+/// Accent bar marking where a dragged pane tab will be inserted.
+private struct InsertionMarker: View {
+    var body: some View {
+        Capsule()
+            .fill(Color.accentColor)
+            .frame(width: 2)
+            .padding(.vertical, 4)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
 
@@ -287,6 +581,9 @@ private struct PaneTabItem: View {
     let selectedBackground: Color
     let onSelect: () -> Void
     let onClose: () -> Void
+    let moveTargets: [(id: UUID, title: String)]
+    let canMoveToNewTab: Bool
+    let onMove: (SurfaceDropDestination) -> Void
 
     @State private var isHovering = false
     @State private var isHoveringClose = false
@@ -351,6 +648,16 @@ private struct PaneTabItem: View {
             if !hovering { isHoveringClose = false }
         }
         .contextMenu {
+            Button("Move to New Tab") { onMove(.newTab) }
+                .disabled(!canMoveToNewTab)
+            if !moveTargets.isEmpty {
+                Menu("Move to Tab") {
+                    ForEach(moveTargets, id: \.id) { target in
+                        Button(target.title) { onMove(.tab(target.id)) }
+                    }
+                }
+            }
+            Divider()
             Button("Close Terminal", action: onClose)
         }
         .accessibilityElement(children: .ignore)

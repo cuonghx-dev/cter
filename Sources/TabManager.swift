@@ -58,6 +58,25 @@ final class TerminalPane: Identifiable, ObservableObject {
         selectedSurfaceId = surfaces[min(index, surfaces.count - 1)].id
     }
 
+    /// Inserts a surface at `index` (clamped), or after the selected one when nil, and selects it.
+    func insert(_ surface: TerminalSurface, at index: Int?) {
+        guard let index else {
+            insert(surface)
+            return
+        }
+        surfaces.insert(surface, at: max(0, min(index, surfaces.count)))
+        selectedSurfaceId = surface.id
+    }
+
+    /// Moves a surface so it lands before the surface currently at `index`
+    /// (`surfaces.count` moves it to the end).
+    func move(surfaceId: UUID, toInsertionIndex index: Int) {
+        guard let from = surfaces.firstIndex(where: { $0.id == surfaceId }) else { return }
+        let destination = from < index ? index - 1 : index
+        guard destination != from else { return }
+        move(surfaceId: surfaceId, to: destination)
+    }
+
     func move(surfaceId: UUID, to destination: Int) {
         guard let index = surfaces.firstIndex(where: { $0.id == surfaceId }) else { return }
         let surface = surfaces.remove(at: index)
@@ -134,8 +153,31 @@ class Tab: Identifiable, ObservableObject {
         self.focusedSurfaceId = surface.id
     }
 
+    /// Builds a tab around a surface dragged out of another tab.
+    init(adopting surface: TerminalSurface, metadata: SurfaceMetadata) {
+        let id = UUID()
+        self.id = id
+        let title = metadata.title ?? "Terminal"
+        self.processTitle = title
+        self.title = title
+        self.customTitle = nil
+        self.currentDirectory = metadata.directory ?? FileManager.default.homeDirectoryForCurrentUser.path
+        surface.reassign(toTab: id)
+        self.splitTree = SplitTree(view: TerminalPane(surface: surface))
+        self.focusedSurfaceId = surface.id
+        applyMetadata(metadata, for: surface.id)
+    }
+
     var panes: [TerminalPane] {
         splitTree.root?.leaves() ?? []
+    }
+
+    var focusedPane: TerminalPane? {
+        focusedSurfaceId.flatMap(pane(containing:))
+    }
+
+    func pane(id paneId: UUID) -> TerminalPane? {
+        panes.first(where: { $0.id == paneId })
     }
 
     /// Every terminal surface in this tab, in split order then pane-tab order.
@@ -411,6 +453,68 @@ class Tab: Identifiable, ObservableObject {
         }
 
         return splitTree.focusTarget(for: .previous, from: node)
+    }
+
+    /// Per-surface sidebar metadata that travels with a surface moved to another tab.
+    struct SurfaceMetadata {
+        var title: String?
+        var directory: String?
+        var ports: [Int]?
+    }
+
+    func surfaceMetadata(for surfaceId: UUID) -> SurfaceMetadata {
+        SurfaceMetadata(
+            title: surfaceTitles[surfaceId],
+            directory: surfaceDirectories[surfaceId],
+            ports: surfaceListeningPorts[surfaceId]
+        )
+    }
+
+    private func applyMetadata(_ metadata: SurfaceMetadata, for surfaceId: UUID) {
+        if let title = metadata.title { surfaceTitles[surfaceId] = title }
+        if let directory = metadata.directory { surfaceDirectories[surfaceId] = directory }
+        if let ports = metadata.ports {
+            surfaceListeningPorts[surfaceId] = ports
+            recomputeListeningPorts()
+        }
+    }
+
+    /// Takes a surface out of this tab's layout without terminating it, so it can be placed
+    /// elsewhere. The tab's split tree is empty afterwards if it was the last surface.
+    func detachSurface(_ surfaceId: UUID) -> TerminalSurface? {
+        guard let surface = surface(for: surfaceId), closeSurface(surfaceId) else { return nil }
+        return surface
+    }
+
+    /// Places a detached surface as a tab of `paneId` (the focused pane when nil).
+    func adoptSurface(
+        _ surface: TerminalSurface,
+        metadata: SurfaceMetadata,
+        intoPane paneId: UUID?,
+        at index: Int?
+    ) -> Bool {
+        guard let pane = paneId.flatMap(pane(id:)) ?? focusedPane ?? panes.first else { return false }
+        surface.reassign(toTab: id)
+        pane.insert(surface, at: index)
+        applyMetadata(metadata, for: surface.id)
+        return true
+    }
+
+    /// Places a detached surface in a new split next to `paneId`.
+    func adoptSurface(
+        _ surface: TerminalSurface,
+        metadata: SurfaceMetadata,
+        splitting paneId: UUID,
+        direction: SplitTree<TerminalPane>.NewDirection
+    ) -> Bool {
+        guard let pane = pane(id: paneId),
+              let newTree = try? splitTree.inserting(view: TerminalPane(surface: surface), at: pane, direction: direction) else {
+            return false
+        }
+        surface.reassign(toTab: id)
+        splitTree = newTree
+        applyMetadata(metadata, for: surface.id)
+        return true
     }
 
     func closeSurface(_ surfaceId: UUID) -> Bool {
@@ -1122,6 +1226,112 @@ class TabManager: ObservableObject {
         }
 
         return true
+    }
+}
+
+/// Where a dragged pane tab (terminal surface) is dropped.
+enum SurfaceDropDestination: Equatable {
+    /// As a tab of a pane, before the surface at `index` (nil: after the selected one).
+    case pane(tabId: UUID, paneId: UUID, index: Int?)
+    /// In a new split beside a pane.
+    case split(tabId: UUID, paneId: UUID, direction: SplitTree<TerminalPane>.NewDirection)
+    /// Into the focused pane of a sidebar tab.
+    case tab(UUID)
+    /// Into a brand-new sidebar tab, inserted after the source tab.
+    case newTab
+}
+
+extension TabManager {
+    func tab(containingSurface surfaceId: UUID) -> Tab? {
+        tabs.first(where: { $0.pane(containing: surfaceId) != nil })
+    }
+
+    /// False for drops that would leave everything where it is.
+    func canMoveSurface(_ surfaceId: UUID, to destination: SurfaceDropDestination) -> Bool {
+        guard let sourceTab = tab(containingSurface: surfaceId),
+              let sourcePane = sourceTab.pane(containing: surfaceId) else { return false }
+        switch destination {
+        case .pane(let tabId, let paneId, let index):
+            guard let target = tabs.first(where: { $0.id == tabId }),
+                  let pane = target.pane(id: paneId) else { return false }
+            guard pane === sourcePane else { return true }
+            guard let index, let from = pane.surfaces.firstIndex(where: { $0.id == surfaceId }) else { return false }
+            return index != from && index != from + 1
+        case .split(let tabId, let paneId, _):
+            guard let target = tabs.first(where: { $0.id == tabId }),
+                  let pane = target.pane(id: paneId) else { return false }
+            return !(pane === sourcePane && pane.surfaces.count == 1)
+        case .tab(let tabId):
+            return tabId != sourceTab.id && tabs.contains(where: { $0.id == tabId })
+        case .newTab:
+            return sourceTab.allSurfaces.count > 1
+        }
+    }
+
+    /// Moves a live terminal surface to a new place in this window without restarting it.
+    /// Closes the source tab if the move empties it.
+    func moveSurface(_ surfaceId: UUID, to destination: SurfaceDropDestination) {
+        guard canMoveSurface(surfaceId, to: destination),
+              let sourceTab = tab(containingSurface: surfaceId),
+              let sourcePane = sourceTab.pane(containing: surfaceId) else { return }
+
+        // Reordering inside one pane leaves the layout untouched.
+        if case .pane(_, let paneId, let index?) = destination, paneId == sourcePane.id {
+            sourcePane.move(surfaceId: surfaceId, toInsertionIndex: index)
+            return
+        }
+
+        let targetTab: Tab?
+        switch destination {
+        case .pane(let tabId, _, _), .split(let tabId, _, _), .tab(let tabId):
+            targetTab = tabs.first(where: { $0.id == tabId })
+        case .newTab:
+            targetTab = nil
+        }
+
+        let previousFocus = selectedTab?.focusedSurface
+        let metadata = sourceTab.surfaceMetadata(for: surfaceId)
+        guard let surface = sourceTab.detachSurface(surfaceId) else { return }
+        if sourceTab.id != targetTab?.id {
+            AppDelegate.shared?.notificationStore?.clearNotifications(forTabId: sourceTab.id, surfaceId: surfaceId)
+        }
+
+        var placed = false
+        if let targetTab {
+            switch destination {
+            case .pane(_, let paneId, let index):
+                placed = targetTab.adoptSurface(surface, metadata: metadata, intoPane: paneId, at: index)
+            case .split(_, let paneId, let direction):
+                placed = targetTab.adoptSurface(surface, metadata: metadata, splitting: paneId, direction: direction)
+            case .tab:
+                placed = targetTab.adoptSurface(surface, metadata: metadata, intoPane: nil, at: nil)
+            case .newTab:
+                break
+            }
+        }
+
+        let destinationTab: Tab
+        if placed, let targetTab {
+            destinationTab = targetTab
+        } else {
+            // New-tab drops, plus a fallback so a failed placement never kills the terminal.
+            let newTab = Tab(adopting: surface, metadata: metadata)
+            let insertIndex = tabs.firstIndex(where: { $0.id == sourceTab.id }).map { index in
+                sourceTab.isPinned ? (tabs.lastIndex(where: { $0.isPinned }) ?? index) + 1 : index + 1
+            } ?? tabs.count
+            tabs.insert(newTab, at: min(insertIndex, tabs.count))
+            destinationTab = newTab
+        }
+
+        if sourceTab.splitTree.isEmpty {
+            closeTab(sourceTab)
+        }
+
+        selectedTabId = destinationTab.id
+        destinationTab.focusSurface(surface.id)
+        DispatchQueue.main.async {
+            surface.hostedView.moveFocus(from: previousFocus === surface ? nil : previousFocus?.hostedView)
+        }
     }
 }
 

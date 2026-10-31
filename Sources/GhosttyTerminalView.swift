@@ -838,7 +838,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
     private weak var attachedView: GhosttyNSView?
     private var isVisible = true
     let id: UUID
-    let tabId: UUID
+    private(set) var tabId: UUID
     private let surfaceContext: ghostty_surface_context_e
     private let configTemplate: ghostty_surface_config_s?
     private let workingDirectory: String?
@@ -892,6 +892,14 @@ final class TerminalSurface: Identifiable, ObservableObject {
         self.hostedView = GhosttySurfaceScrollView(surfaceView: view)
         // Surface is created when attached to a view
         hostedView.attachSurface(self)
+    }
+
+    /// Re-homes this surface in another tab (drag-and-drop between sidebar tabs). The shell's
+    /// `CTER_TAB_ID` env var keeps the original value; the running process can't be updated.
+    func reassign(toTab newTabId: UUID) {
+        guard tabId != newTabId else { return }
+        tabId = newTabId
+        surfaceView.tabId = newTabId
     }
 
     private func scaleFactors(for view: GhosttyNSView) -> (x: CGFloat, y: CGFloat, layer: CGFloat) {

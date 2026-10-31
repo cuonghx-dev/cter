@@ -580,19 +580,105 @@ private struct SidebarEmptyArea: View {
     @Binding var selection: SidebarSelection
     @Binding var selectedTabIds: Set<UUID>
     @Binding var lastSidebarSelectionIndex: Int?
+    @ObservedObject private var dragState = SurfaceDragState.shared
+    @State private var isDropTargeted = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// A pane tab drag is in flight and could become its own sidebar tab.
+    private var showsNewTabDrop: Bool {
+        guard let surfaceId = dragState.surfaceId else { return false }
+        return tabManager.canMoveSurface(surfaceId, to: .newTab)
+    }
 
     var body: some View {
-        Color.clear
-            .contentShape(Rectangle())
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onTapGesture(count: 2) {
-                tabManager.addTab()
-                if let selectedId = tabManager.selectedTabId {
-                    selectedTabIds = [selectedId]
-                    lastSidebarSelectionIndex = tabManager.tabs.firstIndex { $0.id == selectedId }
-                }
-                selection = .tabs
+        VStack(spacing: 0) {
+            if showsNewTabDrop {
+                NewTabDropPlaceholder(isTargeted: isDropTargeted)
+                    .padding(.horizontal, 6)
+                    .transition(.opacity)
             }
+            Color.clear
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: showsNewTabDrop)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            tabManager.addTab()
+            syncSelection()
+        }
+        .onDrop(of: [UTType.cterPaneSurface], delegate: NewTabDropDelegate(
+            isTargeted: $isDropTargeted,
+            onDrop: { DispatchQueue.main.async { syncSelection() } }
+        ))
+        .onChange(of: dragState.surfaceId) { if $0 == nil { isDropTargeted = false } }
+    }
+
+    private func syncSelection() {
+        if let selectedId = tabManager.selectedTabId {
+            selectedTabIds = [selectedId]
+            lastSidebarSelectionIndex = tabManager.tabs.firstIndex { $0.id == selectedId }
+        }
+        selection = .tabs
+    }
+}
+
+/// Dashed drop slot shown below the sidebar tabs while a pane tab is dragged.
+private struct NewTabDropPlaceholder: View {
+    let isTargeted: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "plus.rectangle.on.rectangle")
+                .font(.system(size: 11, weight: .medium))
+            Text("Drop to open in new tab")
+                .font(.system(size: 12))
+                .lineLimit(1)
+        }
+        .foregroundColor(isTargeted ? .accentColor : .secondary)
+        .frame(maxWidth: .infinity, minHeight: 36)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.accentColor.opacity(isTargeted ? 0.15 : 0))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(
+                    isTargeted ? Color.accentColor : Color.secondary.opacity(0.5),
+                    style: StrokeStyle(lineWidth: 1.5, dash: [4, 3])
+                )
+        )
+        .accessibilityHidden(true)
+    }
+}
+
+private struct NewTabDropDelegate: DropDelegate {
+    @Binding var isTargeted: Bool
+    let onDrop: () -> Void
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.cterPaneSurface])
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        let allowed = SurfaceDragState.shared.allows(.newTab)
+        if isTargeted != allowed { isTargeted = allowed }
+        return DropProposal(operation: allowed ? .move : .forbidden)
+    }
+
+    func dropExited(info: DropInfo) {
+        isTargeted = false
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        isTargeted = false
+        let dragState = SurfaceDragState.shared
+        guard dragState.allows(.newTab) else {
+            dragState.end()
+            return false
+        }
+        dragState.perform(info, destination: .newTab)
+        onDrop()
+        return true
     }
 }
 
@@ -612,6 +698,8 @@ struct TabItemView: View {
     @State private var renameText = ""
     @FocusState private var renameFieldFocused: Bool
     @State private var isHoveringClose = false
+    /// A dragged pane tab is hovering this row and would move into this tab on drop.
+    @State private var isSurfaceDropTarget = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var isActive: Bool {
@@ -798,6 +886,13 @@ struct TabItemView: View {
                 .fill(backgroundColor)
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isHovering)
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(isActive ? Color.white.opacity(0.9) : Color.accentColor, lineWidth: 2)
+                .opacity(isSurfaceDropTarget ? 1 : 0)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isSurfaceDropTarget)
+                .allowsHitTesting(false)
+        )
         .padding(.horizontal, 6)
         .opacity(draggingTabId == tab.id ? 0.5 : 1)
         .contentShape(Rectangle())
@@ -823,11 +918,12 @@ struct TabItemView: View {
             return NSItemProvider.cterDragItem(tab.id, type: .cterSidebarTab)
         }
         .onDrop(
-            of: [UTType.cterSidebarTab],
+            of: [UTType.cterSidebarTab, UTType.cterPaneSurface],
             delegate: SidebarTabDropDelegate(
                 targetTabId: tab.id,
                 tabManager: tabManager,
                 draggingTabId: $draggingTabId,
+                isSurfaceDropTarget: $isSurfaceDropTarget,
                 onReorder: { syncSelectionAfterMutation() },
                 animate: !reduceMotion
             )
@@ -1180,20 +1276,34 @@ extension NSItemProvider {
     }
 }
 
-/// Live-reorders sidebar tabs while a row drag hovers over other rows. Only reacts to drags
-/// that started in the sidebar, so text dropped from other apps is ignored.
+/// Drop handling for a sidebar row. Sidebar tab drags live-reorder the rows; pane tab drags
+/// move that terminal into this row's tab, and hovering for a moment opens the tab so the
+/// terminal can be dropped onto a specific pane or edge. Text from other apps is ignored.
 private struct SidebarTabDropDelegate: DropDelegate {
     let targetTabId: UUID
     let tabManager: TabManager
     @Binding var draggingTabId: UUID?
+    @Binding var isSurfaceDropTarget: Bool
     let onReorder: () -> Void
     let animate: Bool
 
+    /// Pending "open this tab" while a pane tab hovers the row (spring loading).
+    private static var springLoad: DispatchWorkItem?
+    private static let springLoadDelay: TimeInterval = 0.7
+
+    private var isSurfaceDrag: Bool {
+        draggingTabId == nil && SurfaceDragState.shared.surfaceId != nil
+    }
+
     func validateDrop(info: DropInfo) -> Bool {
-        draggingTabId != nil
+        draggingTabId != nil || info.hasItemsConforming(to: [.cterPaneSurface])
     }
 
     func dropEntered(info: DropInfo) {
+        if draggingTabId == nil {
+            scheduleSpringLoad()
+            return
+        }
         guard let draggingTabId, draggingTabId != targetTabId else { return }
         if animate {
             withAnimation(.easeInOut(duration: 0.18)) {
@@ -1205,14 +1315,54 @@ private struct SidebarTabDropDelegate: DropDelegate {
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: draggingTabId != nil ? .move : .forbidden)
+        if draggingTabId != nil {
+            return DropProposal(operation: .move)
+        }
+        let allowed = SurfaceDragState.shared.allows(.tab(targetTabId))
+        if isSurfaceDropTarget != allowed { isSurfaceDropTarget = allowed }
+        return DropProposal(operation: allowed ? .move : .forbidden)
+    }
+
+    func dropExited(info: DropInfo) {
+        cancelSpringLoad()
+        isSurfaceDropTarget = false
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        let handled = draggingTabId != nil
-        draggingTabId = nil
-        onReorder()
-        return handled
+        cancelSpringLoad()
+        isSurfaceDropTarget = false
+        if draggingTabId != nil {
+            draggingTabId = nil
+            onReorder()
+            return true
+        }
+        let dragState = SurfaceDragState.shared
+        guard dragState.allows(.tab(targetTabId)) else {
+            dragState.end()
+            return false
+        }
+        dragState.perform(info, destination: .tab(targetTabId))
+        DispatchQueue.main.async { onReorder() }
+        return true
+    }
+
+    private func scheduleSpringLoad() {
+        cancelSpringLoad()
+        guard tabManager.selectedTabId != targetTabId else { return }
+        let targetTabId = targetTabId
+        let tabManager = tabManager
+        let work = DispatchWorkItem {
+            guard SurfaceDragState.shared.surfaceId != nil,
+                  let tab = tabManager.tabs.first(where: { $0.id == targetTabId }) else { return }
+            tabManager.selectTab(tab)
+        }
+        Self.springLoad = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.springLoadDelay, execute: work)
+    }
+
+    private func cancelSpringLoad() {
+        Self.springLoad?.cancel()
+        Self.springLoad = nil
     }
 }
 
