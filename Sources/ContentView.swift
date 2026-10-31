@@ -223,14 +223,19 @@ struct ContentView: View {
                     TerminalSplitTreeView(tab: tab, isTabActive: isActive)
                         .opacity(isActive ? 1 : 0)
                         .allowsHitTesting(isActive)
+                        // Hidden tabs are still walked by the accessibility subsystem on
+                        // every layout pass, which blocks key event dequeue (typing lag).
+                        .accessibilityHidden(!isActive)
                 }
             }
             .opacity(sidebarSelection == .tabs ? 1 : 0)
             .allowsHitTesting(sidebarSelection == .tabs)
+            .accessibilityHidden(sidebarSelection != .tabs)
 
             NotificationsPage(selection: $sidebarSelection)
                 .opacity(sidebarSelection == .notifications ? 1 : 0)
                 .allowsHitTesting(sidebarSelection == .notifications)
+                .accessibilityHidden(sidebarSelection != .notifications)
         }
         .padding(.top, titlebarPadding)
         .overlay(alignment: .top) {

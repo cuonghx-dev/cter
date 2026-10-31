@@ -75,7 +75,12 @@ struct GhosttyConfig {
     mutating func parse(_ contents: String) {
         let lines = contents.components(separatedBy: .newlines)
         for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            var trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Strip a leading UTF-8 BOM so a BOM-encoded first line is still parsed.
+            if trimmed.hasPrefix("\u{FEFF}") {
+                trimmed.removeFirst()
+                trimmed = trimmed.trimmingCharacters(in: .whitespaces)
+            }
             if trimmed.isEmpty || trimmed.hasPrefix("#") {
                 continue
             }
@@ -175,7 +180,8 @@ struct GhosttyConfig {
         guard fileManager.fileExists(atPath: path) else { return nil }
 
         if let attributes = try? fileManager.attributesOfItem(atPath: path) {
-            if let type = attributes[.type] as? FileAttributeType, type != .typeRegular {
+            if let type = attributes[.type] as? FileAttributeType,
+               type != .typeRegular && type != .typeSymbolicLink {
                 return nil
             }
             if let size = attributes[.size] as? NSNumber, size.intValue == 0 {

@@ -473,24 +473,30 @@ class GhosttyApp {
             }
         case GHOSTTY_ACTION_SCROLLBAR:
             let scrollbar = GhosttyScrollbar(c: action.action.scrollbar)
-            surfaceView.scrollbar = scrollbar
-            NotificationCenter.default.post(
-                name: .ghosttyDidUpdateScrollbar,
-                object: surfaceView,
-                userInfo: [GhosttyNotificationKey.scrollbar: scrollbar]
-            )
+            // Action callbacks can arrive off the main thread; macOS 26 rejects
+            // AppKit/published state changes from background threads.
+            DispatchQueue.main.async {
+                surfaceView.scrollbar = scrollbar
+                NotificationCenter.default.post(
+                    name: .ghosttyDidUpdateScrollbar,
+                    object: surfaceView,
+                    userInfo: [GhosttyNotificationKey.scrollbar: scrollbar]
+                )
+            }
             return true
         case GHOSTTY_ACTION_CELL_SIZE:
             let cellSize = CGSize(
                 width: CGFloat(action.action.cell_size.width),
                 height: CGFloat(action.action.cell_size.height)
             )
-            surfaceView.cellSize = cellSize
-            NotificationCenter.default.post(
-                name: .ghosttyDidUpdateCellSize,
-                object: surfaceView,
-                userInfo: [GhosttyNotificationKey.cellSize: cellSize]
-            )
+            DispatchQueue.main.async {
+                surfaceView.cellSize = cellSize
+                NotificationCenter.default.post(
+                    name: .ghosttyDidUpdateCellSize,
+                    object: surfaceView,
+                    userInfo: [GhosttyNotificationKey.cellSize: cellSize]
+                )
+            }
             return true
         case GHOSTTY_ACTION_START_SEARCH:
             guard let terminalSurface = surfaceView.terminalSurface else { return true }
@@ -582,17 +588,18 @@ class GhosttyApp {
         case GHOSTTY_ACTION_COLOR_CHANGE:
             if action.action.color_change.kind == GHOSTTY_ACTION_COLOR_KIND_BACKGROUND {
                 let change = action.action.color_change
-                surfaceView.backgroundColor = NSColor(
+                let newColor = NSColor(
                     red: CGFloat(change.r) / 255,
                     green: CGFloat(change.g) / 255,
                     blue: CGFloat(change.b) / 255,
                     alpha: 1.0
                 )
-                surfaceView.applySurfaceBackground()
-                if backgroundLogEnabled {
-                    logBackground("OSC background change tab=\(surfaceView.tabId?.uuidString ?? "unknown") color=\(surfaceView.backgroundColor?.description ?? "nil")")
-                }
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [self] in
+                    surfaceView.backgroundColor = newColor
+                    surfaceView.applySurfaceBackground()
+                    if backgroundLogEnabled {
+                        logBackground("OSC background change tab=\(surfaceView.tabId?.uuidString ?? "unknown") color=\(surfaceView.backgroundColor?.description ?? "nil")")
+                    }
                     surfaceView.applyWindowBackgroundIfActive()
                 }
             }
@@ -726,6 +733,8 @@ final class TerminalSurface: Identifiable, ObservableObject {
         }
     }
     private var searchNeedleCancellable: AnyCancellable?
+    /// Last focus state sent to Ghostty; nil until the first `setFocus`.
+    private var lastFocusState: Bool?
 
     init(
         tabId: UUID,
@@ -987,8 +996,19 @@ final class TerminalSurface: Identifiable, ObservableObject {
         surfaceView.applyWindowBackgroundIfActive()
     }
 
+    /// Keep `lastFocusState` in sync when the hosted view's responder chain calls
+    /// `ghostty_surface_set_focus` directly; otherwise a later `setFocus` is
+    /// wrongly deduplicated against a stale value.
+    func recordExternalFocusState(_ focused: Bool) {
+        lastFocusState = focused
+    }
+
     func setFocus(_ focused: Bool) {
         guard let surface = surface else { return }
+        // Only send focus events when the state changes; redundant focus events
+        // make zsh themes like Powerlevel10k redraw the prompt.
+        guard focused != lastFocusState else { return }
+        lastFocusState = focused
         ghostty_surface_set_focus(surface, focused)
 
         // Focusing a surface while it is being reparented can start Ghostty's display link
@@ -1311,6 +1331,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
                 )
             }
 #endif
+            terminalSurface?.recordExternalFocusState(true)
             ghostty_surface_set_focus(surface, true)
         }
         return result
@@ -1323,11 +1344,16 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     // For NSTextInputClient - accumulates text during key events
     private var keyTextAccumulator: [String]? = nil
     private var markedText = NSMutableAttributedString()
+    // Set when interpretKeyEvents asks for deleteBackward: during the current keyDown.
+    private var keyRequestedDeleteBackward = false
     private var lastPerformKeyEvent: TimeInterval?
 
     // Prevents NSBeep for unimplemented actions from interpretKeyEvents
     override func doCommand(by selector: Selector) {
-        // Intentionally empty - prevents system beep on unhandled key commands
+        // Otherwise empty - prevents system beep on unhandled key commands
+        if keyTextAccumulator != nil, selector == #selector(deleteBackward(_:)) {
+            keyRequestedDeleteBackward = true
+        }
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -1342,10 +1368,26 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             return false
         }
 
+        let flags = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .subtracting([.numericPad, .function, .capsLock])
+
+        // Printable text without Command/Control should stay on the normal keyDown
+        // path. AppKit can still route layout-dependent punctuation through
+        // performKeyEquivalent first, and probing bindings here can misclassify
+        // keys such as ABC-QWERTZ Shift+7 ("/") or Shift+- ("?") as shortcuts.
+        if !flags.contains(.command),
+           !flags.contains(.control),
+           let text = textForKeyEvent(event),
+           shouldSendText(text) {
+            lastPerformKeyEvent = nil
+            return false
+        }
+
         // Check if this event matches a Ghostty keybinding.
         let bindingFlags: ghostty_binding_flags_e? = {
             var keyEvent = ghosttyKeyEvent(for: event, surface: surface)
-            let text = event.characters ?? ""
+            let text = textForKeyEvent(event).flatMap { shouldSendText($0) ? $0 : nil } ?? ""
             var flags = ghostty_binding_flags_e(0)
             let isBinding = text.withCString { ptr in
                 keyEvent.text = ptr
@@ -1401,7 +1443,9 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             if let lastPerformKeyEvent {
                 self.lastPerformKeyEvent = nil
                 if lastPerformKeyEvent == event.timestamp {
-                    equivalent = event.characters ?? ""
+                    // Cmd-modified keys produce no text, so `characters` is empty for
+                    // combos like Cmd+Shift+K; use the key itself so Ghostty can encode it.
+                    equivalent = event.charactersIgnoringModifiers ?? ""
                     break
                 }
             }
@@ -1433,7 +1477,9 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
 
     override func keyDown(with event: NSEvent) {
         guard let surface = surface else {
-            super.keyDown(with: event)
+            // This view is itself the terminal responder. Passing the event to NSView
+            // while the surface is unavailable makes AppKit interpret Escape and other
+            // control keys as unhandled commands (escape leak, alert beep).
             return
         }
 
@@ -1483,6 +1529,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
 
         // Set up text accumulator for interpretKeyEvents
         keyTextAccumulator = []
+        keyRequestedDeleteBackward = false
         defer { keyTextAccumulator = nil }
 
         // Track whether we had marked text (IME preedit) before this event,
@@ -1525,45 +1572,109 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         // the prior input characters (prior to the composing).
         keyEvent.composing = markedText.length > 0 || markedTextBefore
 
+        let accumulatedText = keyTextAccumulator ?? []
+
+        // Vietnamese Telex commits its preedit on Backspace, then asks for
+        // deleteBackward:. Ghostty drops UTF-8 attached to a Backspace key, so
+        // send the commit as typed text and replay the Backspace on its own.
+        if keyRequestedDeleteBackward, !accumulatedText.isEmpty {
+            for text in accumulatedText where shouldSendText(text) {
+                sendCommittedText(text, surface: surface)
+            }
+            keyEvent.composing = false
+            keyEvent.consumed_mods = GHOSTTY_MODS_NONE
+            keyEvent.text = nil
+            _ = ghostty_surface_key(surface, keyEvent)
+            return
+        }
+
         // Use accumulated text from insertText (for IME), or compute text for key
-        if let accumulated = keyTextAccumulator, !accumulated.isEmpty {
+        if !accumulatedText.isEmpty {
             // Accumulated text is the result of a composition, never composing.
             keyEvent.composing = false
-            for text in accumulated {
+            for text in accumulatedText {
                 if shouldSendText(text) {
                     text.withCString { ptr in
                         keyEvent.text = ptr
                         _ = ghostty_surface_key(surface, keyEvent)
                     }
                 } else {
+                    keyEvent.consumed_mods = GHOSTTY_MODS_NONE
                     keyEvent.text = nil
                     _ = ghostty_surface_key(surface, keyEvent)
                 }
+            }
+
+            if shouldSendCommittedIMEConfirmKey(event: translationEvent, markedTextBefore: markedTextBefore) {
+                keyEvent.consumed_mods = GHOSTTY_MODS_NONE
+                keyEvent.text = nil
+                _ = ghostty_surface_key(surface, keyEvent)
             }
         } else {
             // Get the appropriate text for this key event
             // For control characters, this returns the unmodified character
             // so Ghostty's KeyEncoder can handle ctrl encoding
+            let suppressFallbackText =
+                keyEvent.composing ||
+                shouldSuppressShiftSpaceFallbackText(event: translationEvent, markedTextBefore: markedTextBefore)
             if let text = textForKeyEvent(translationEvent) {
-                if shouldSendText(text) {
+                if shouldSendText(text), !suppressFallbackText {
                     text.withCString { ptr in
                         keyEvent.text = ptr
                         _ = ghostty_surface_key(surface, keyEvent)
                     }
                 } else {
+                    keyEvent.consumed_mods = GHOSTTY_MODS_NONE
                     keyEvent.text = nil
                     _ = ghostty_surface_key(surface, keyEvent)
                 }
             } else {
+                keyEvent.consumed_mods = GHOSTTY_MODS_NONE
                 keyEvent.text = nil
                 _ = ghostty_surface_key(surface, keyEvent)
             }
         }
     }
 
+    /// Send IME-committed text as a plain typed chunk, detached from the physical key.
+    private func sendCommittedText(_ text: String, surface: ghostty_surface_t) {
+        var keyEvent = ghostty_input_key_s()
+        keyEvent.action = GHOSTTY_ACTION_PRESS
+        keyEvent.keycode = 0
+        keyEvent.mods = GHOSTTY_MODS_NONE
+        keyEvent.consumed_mods = GHOSTTY_MODS_NONE
+        keyEvent.unshifted_codepoint = 0
+        keyEvent.composing = false
+        text.withCString { ptr in
+            keyEvent.text = ptr
+            _ = ghostty_surface_key(surface, keyEvent)
+        }
+    }
+
+    /// Korean IME commits the syllable and executes on a single Return, but the commit
+    /// swallows the Return itself. Japanese/Chinese IMEs use Return only to confirm the
+    /// conversion, so the extra Return is limited to Korean input sources.
+    private func shouldSendCommittedIMEConfirmKey(event: NSEvent, markedTextBefore: Bool) -> Bool {
+        guard markedTextBefore, markedText.length == 0 else { return false }
+        guard event.keyCode == 36 || event.keyCode == 76 else { return false }
+        guard let sourceId = Self.currentKeyboardLayoutID else { return false }
+        return sourceId.range(of: "korean", options: .caseInsensitive) != nil
+    }
+
+    /// If AppKit consumed Shift+Space for IME/input-source switching, interpretKeyEvents
+    /// can return without insertText and without a detectable layout ID change.
+    /// In that case we must not synthesize a literal space fallback.
+    private func shouldSuppressShiftSpaceFallbackText(event: NSEvent, markedTextBefore: Bool) -> Bool {
+        guard event.keyCode == 49 else { return false }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags == [.shift] else { return false }
+        guard !markedTextBefore, markedText.length == 0 else { return false }
+        return true
+    }
+
     override func keyUp(with event: NSEvent) {
         guard let surface = surface else {
-            super.keyUp(with: event)
+            // Pair with the consumed key-down path above.
             return
         }
 
@@ -1579,18 +1690,67 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
 
     override func flagsChanged(with event: NSEvent) {
         guard let surface = surface else {
-            super.flagsChanged(with: event)
+            // Modifier changes are terminal input too; don't hand them to AppKit.
             return
         }
 
+        guard !hasMarkedText(),
+              let action = Self.modifierAction(forFlagsChanged: event) else { return }
+
+        // Build the event by hand: modifier-only events must not reach the AppKit
+        // character APIs used for regular key input.
         var keyEvent = ghostty_input_key_s()
-        keyEvent.action = GHOSTTY_ACTION_PRESS
+        keyEvent.action = action
         keyEvent.keycode = UInt32(event.keyCode)
         keyEvent.mods = modsFromEvent(event)
         keyEvent.consumed_mods = GHOSTTY_MODS_NONE
         keyEvent.text = nil
         keyEvent.composing = false
+        keyEvent.unshifted_codepoint = 0
         _ = ghostty_surface_key(surface, keyEvent)
+    }
+
+    /// `flagsChanged` fires for both modifier presses and releases. Reporting every
+    /// edge as a press leaves Ghostty with a phantom held modifier until a later
+    /// focus loss flushes release events into the PTY.
+    private static func modifierAction(forFlagsChanged event: NSEvent) -> ghostty_input_action_e? {
+        let flags = event.modifierFlags
+        let rawFlags = flags.rawValue
+        let modifierActive: Bool
+        switch event.keyCode {
+        case 0x39:
+            modifierActive = flags.contains(.capsLock)
+        case 0x38, 0x3C:
+            modifierActive = flags.contains(.shift)
+        case 0x3B, 0x3E:
+            modifierActive = flags.contains(.control)
+        case 0x3A, 0x3D:
+            modifierActive = flags.contains(.option)
+        case 0x37, 0x36:
+            modifierActive = flags.contains(.command)
+        default:
+            return nil
+        }
+
+        guard modifierActive else { return GHOSTTY_ACTION_RELEASE }
+
+        // The other side of the same modifier may still be held, so check the
+        // device-dependent bit for right-side keys.
+        let sidePressed: Bool
+        switch event.keyCode {
+        case 0x3C:
+            sidePressed = rawFlags & UInt(NX_DEVICERSHIFTKEYMASK) != 0
+        case 0x3E:
+            sidePressed = rawFlags & UInt(NX_DEVICERCTLKEYMASK) != 0
+        case 0x3D:
+            sidePressed = rawFlags & UInt(NX_DEVICERALTKEYMASK) != 0
+        case 0x36:
+            sidePressed = rawFlags & UInt(NX_DEVICERCMDKEYMASK) != 0
+        default:
+            sidePressed = true
+        }
+
+        return sidePressed ? GHOSTTY_ACTION_PRESS : GHOSTTY_ACTION_RELEASE
     }
 
     private func modsFromEvent(_ event: NSEvent) -> ghostty_input_mods_e {
@@ -1621,10 +1781,22 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         guard let chars = event.characters, !chars.isEmpty else { return nil }
 
         if chars.count == 1, let scalar = chars.unicodeScalars.first {
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
             // If we have a single control character, return the character without
             // the control modifier so Ghostty's KeyEncoder can handle it.
-            if scalar.value < 0x20 {
-                return event.characters(byApplyingModifiers: event.modifierFlags.subtracting(.control))
+            if isControlCharacterScalar(scalar) {
+                if flags.contains(.control) {
+                    return event.characters(byApplyingModifiers: event.modifierFlags.subtracting(.control))
+                }
+
+                // Some AppKit key paths can report Shift+` as a bare ESC control
+                // character even though the physical key should produce "~".
+                if scalar.value == 0x1B,
+                   flags == [.shift],
+                   event.charactersIgnoringModifiers == "`" {
+                    return "~"
+                }
             }
             // Private Use Area characters (function keys) should not be sent
             if scalar.value >= 0xF700 && scalar.value <= 0xF8FF {
@@ -1642,9 +1814,16 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         return scalar.value
     }
 
+    private func isControlCharacterScalar(_ scalar: UnicodeScalar) -> Bool {
+        scalar.value < 0x20 || scalar.value == 0x7F
+    }
+
     private func shouldSendText(_ text: String) -> Bool {
-        guard let first = text.utf8.first else { return false }
-        return first >= 0x20
+        guard !text.isEmpty else { return false }
+        if text.count == 1, let scalar = text.unicodeScalars.first {
+            return !isControlCharacterScalar(scalar)
+        }
+        return true
     }
 
     private func ghosttyKeyEvent(for event: NSEvent, surface: ghostty_surface_t) -> ghostty_input_key_s {
@@ -1718,7 +1897,11 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         window?.makeFirstResponder(self)
         guard let surface = surface else { return }
         let point = convert(event.locationInWindow, from: nil)
-        ghostty_surface_mouse_pos(surface, point.x, bounds.height - point.y, modsFromEvent(event))
+        // Only update the mouse position on the first click so a double-click
+        // selection doesn't move the cursor.
+        if event.clickCount == 1 {
+            ghostty_surface_mouse_pos(surface, point.x, bounds.height - point.y, modsFromEvent(event))
+        }
         _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, modsFromEvent(event))
     }
 
@@ -1894,9 +2077,9 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
 
         ghostty_surface_set_display_id(surface, screen.displayID ?? 0)
 
-        DispatchQueue.main.async { [weak self] in
-            self?.viewDidChangeBackingProperties()
-        }
+        // Don't replay viewDidChangeBackingProperties here: AppKit already delivers it
+        // when the backing scale actually changes. Forcing a geometry recommit on every
+        // display connect/disconnect clears the Metal surface for a frame (flash).
     }
 }
 
@@ -2422,13 +2605,26 @@ extension GhosttyNSView: NSTextInputClient {
     }
 
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        let incoming: NSAttributedString
         switch string {
         case let v as NSAttributedString:
-            markedText = NSMutableAttributedString(attributedString: v)
+            incoming = v
         case let v as String:
-            markedText = NSMutableAttributedString(string: v)
+            incoming = NSAttributedString(string: v)
         default:
-            break
+            return
+        }
+
+        // replacementRange is relative to the start of the current marked text.
+        // Japanese IME replaces a subrange during conversion edits, including an
+        // empty replacement for Backspace; keep the rest of the preedit buffer.
+        if markedText.length > 0,
+           replacementRange.location != NSNotFound,
+           replacementRange.location <= markedText.length,
+           replacementRange.length <= markedText.length - replacementRange.location {
+            markedText.replaceCharacters(in: replacementRange, with: incoming)
+        } else {
+            markedText = NSMutableAttributedString(attributedString: incoming)
         }
 
         // If we're not in a keyDown event, sync preedit immediately.
@@ -2496,8 +2692,8 @@ extension GhosttyNSView: NSTextInputClient {
         // Use Ghostty's IME point API for accurate cursor position.
         var x: Double = 0
         var y: Double = 0
-        var w: Double = 0
-        var h: Double = 0
+        var w: Double = cellSize.width
+        var h: Double = cellSize.height
         if let surface = surface {
             ghostty_surface_ime_point(surface, &x, &y, &w, &h)
         }
@@ -2506,7 +2702,7 @@ extension GhosttyNSView: NSTextInputClient {
         let viewRect = NSRect(
             x: x,
             y: frame.size.height - y,
-            width: 0,
+            width: w,
             height: max(h, cellSize.height)
         )
         let winRect = convert(viewRect, to: nil)
