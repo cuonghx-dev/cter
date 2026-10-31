@@ -112,6 +112,9 @@ private struct NotificationRow: View {
     let onClear: () -> Void
     let focusedNotificationId: FocusState<UUID?>.Binding
 
+    @State private var isHovering = false
+    @State private var isHoveringClear = false
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Button(action: onOpen) {
@@ -131,9 +134,10 @@ private struct NotificationRow: View {
                                 .font(.headline)
                                 .foregroundColor(.primary)
                             Spacer()
-                            Text(notification.createdAt.formatted(date: .omitted, time: .shortened))
-                                .font(.caption)
+                            Text(timestampText)
+                                .font(.caption.monospacedDigit())
                                 .foregroundColor(.secondary)
+                                .help(notification.createdAt.formatted(date: .complete, time: .standard))
                         }
 
                         if !notification.body.isEmpty {
@@ -144,9 +148,10 @@ private struct NotificationRow: View {
                         }
 
                         if let tabTitle {
-                            Text(tabTitle)
+                            Label(tabTitle, systemImage: "terminal")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
+                                .lineLimit(1)
                         }
                     }
 
@@ -157,21 +162,55 @@ private struct NotificationRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(accessibilityTitle)
+            .accessibilityHint("Opens the tab that sent this notification")
             .focusable()
             .focused(focusedNotificationId, equals: notification.id)
             .modifier(DefaultActionModifier(isActive: focusedNotificationId.wrappedValue == notification.id))
 
             Button(action: onClear) {
                 Image(systemName: "xmark.circle.fill")
-                    .foregroundColor(.secondary)
+                    .foregroundColor(isHoveringClear ? .primary : .secondary)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .onHover { isHoveringClear = $0 }
+            .help("Dismiss Notification")
+            .accessibilityLabel("Dismiss Notification")
+            .opacity(isHovering || !notification.isRead ? 1 : 0.6)
         }
         .padding(12)
         .background(
             RoundedRectangle(cornerRadius: 10)
                 .fill(Color(nsColor: .controlBackgroundColor))
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Color.primary.opacity(isHovering ? 0.12 : 0.05), lineWidth: 1)
+        )
+        .onHover { isHovering = $0 }
+    }
+
+    /// Time only for today, otherwise include the day so older entries are unambiguous.
+    private var timestampText: String {
+        let date = notification.createdAt
+        if Calendar.current.isDateInToday(date) {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        if Calendar.current.isDateInYesterday(date) {
+            return "Yesterday " + date.formatted(date: .omitted, time: .shortened)
+        }
+        return date.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+    }
+
+    private var accessibilityTitle: String {
+        var parts: [String] = []
+        if !notification.isRead { parts.append("Unread") }
+        parts.append(notification.title)
+        if !notification.body.isEmpty { parts.append(notification.body) }
+        if let tabTitle { parts.append("from \(tabTitle)") }
+        return parts.joined(separator: ", ")
     }
 }
 

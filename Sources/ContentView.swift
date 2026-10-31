@@ -515,6 +515,8 @@ struct TabItemView: View {
     @Binding var selectedTabIds: Set<UUID>
     @Binding var lastSidebarSelectionIndex: Int?
     @State private var isHovering = false
+    @State private var isHoveringClose = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var isActive: Bool {
         tabManager.selectedTabId == tab.id
@@ -536,14 +538,18 @@ struct TabItemView: View {
             HStack(spacing: 8) {
                 let unreadCount = notificationStore.unreadCount(forTabId: tab.id)
                 if unreadCount > 0 {
-                    ZStack {
-                        Circle()
-                            .fill(isActive ? Color.white.opacity(0.25) : Color.accentColor)
-                        Text("\(unreadCount)")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundColor(.white)
-                    }
-                    .frame(width: 16, height: 16)
+                    // Capsule grows with the digit count so "12" / "99+" never clip.
+                    Text(unreadCount > 99 ? "99+" : "\(unreadCount)")
+                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 4)
+                        .frame(minWidth: 16, minHeight: 16)
+                        .background(
+                            Capsule()
+                                .fill(isActive ? Color.white.opacity(0.25) : Color.accentColor)
+                        )
+                        .fixedSize()
+                        .accessibilityHidden(true)
                 }
 
                 if tab.isPinned {
@@ -562,13 +568,22 @@ struct TabItemView: View {
 
                 Button(action: { tabManager.closeTab(tab) }) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundColor(isActive ? .white.opacity(0.7) : .secondary)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(closeButtonForeground)
+                        .frame(width: 18, height: 18)
+                        .background(
+                            Circle()
+                                .fill(closeButtonHoverFill)
+                                .opacity(isHoveringClose ? 1 : 0)
+                        )
+                        .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .frame(width: 16, height: 16)
-                .opacity((isHovering && tabManager.tabs.count > 1) ? 1 : 0)
-                .allowsHitTesting(isHovering && tabManager.tabs.count > 1)
+                .onHover { isHoveringClose = $0 }
+                .help("Close Tab")
+                .accessibilityLabel("Close Tab")
+                .opacity(showCloseButton ? 1 : 0)
+                .allowsHitTesting(showCloseButton)
             }
 
             if let subtitle = latestNotificationText {
@@ -647,13 +662,14 @@ struct TabItemView: View {
                 }
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: tab.logEntries.count)
-        .animation(.easeInOut(duration: 0.2), value: tab.progress != nil)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: tab.logEntries.count)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: tab.progress != nil)
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(
             RoundedRectangle(cornerRadius: 6)
                 .fill(backgroundColor)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isHovering)
         )
         .padding(.horizontal, 6)
         .contentShape(Rectangle())
@@ -662,7 +678,13 @@ struct TabItemView: View {
         }
         .onHover { hovering in
             isHovering = hovering
+            if !hovering { isHoveringClose = false }
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityTitle)
+        .accessibilityAddTraits(isActive ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction { updateSelection() }
+        .accessibilityAction(named: "Close Tab") { tabManager.closeTab(tab) }
         .contextMenu {
             let targetIds = contextTargetIds()
             let shouldPin = !tab.isPinned
@@ -739,7 +761,31 @@ struct TabItemView: View {
         if isMultiSelected {
             return Color.accentColor.opacity(0.25)
         }
+        if isHovering {
+            return Color.primary.opacity(0.07)
+        }
         return Color.clear
+    }
+
+    private var showCloseButton: Bool {
+        isHovering && tabManager.tabs.count > 1
+    }
+
+    private var closeButtonForeground: Color {
+        if isActive { return .white.opacity(isHoveringClose ? 1 : 0.75) }
+        return isHoveringClose ? .primary : .secondary
+    }
+
+    private var closeButtonHoverFill: Color {
+        isActive ? Color.white.opacity(0.2) : Color.primary.opacity(0.1)
+    }
+
+    private var accessibilityTitle: String {
+        var parts: [String] = [tab.title]
+        if tab.isPinned { parts.append("pinned") }
+        let unread = notificationStore.unreadCount(forTabId: tab.id)
+        if unread > 0 { parts.append(unread == 1 ? "1 unread notification" : "\(unread) unread notifications") }
+        return parts.joined(separator: ", ")
     }
 
     private func updateSelection() {
