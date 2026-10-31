@@ -266,10 +266,11 @@ class GhosttyApp {
             return GhosttyApp.shared.handleAction(target: target, action: action)
         }
         runtimeConfig.read_clipboard_cb = { userdata, location, state in
-            // Read clipboard
-            guard let userdata else { return }
+            // Read clipboard. Returning false tells Ghostty the request was not
+            // started, so it frees the request state itself.
+            guard let userdata else { return false }
             let surfaceView = Unmanaged<GhosttyNSView>.fromOpaque(userdata).takeUnretainedValue()
-            guard let surface = surfaceView.terminalSurface?.surface else { return }
+            guard let surface = surfaceView.terminalSurface?.surface else { return false }
 
             let pasteboard = GhosttyPasteboardHelper.pasteboard(for: location)
             let value = pasteboard.flatMap { GhosttyPasteboardHelper.stringContents(from: $0) } ?? ""
@@ -277,6 +278,7 @@ class GhosttyApp {
             value.withCString { ptr in
                 ghostty_surface_complete_clipboard_request(surface, ptr, state, false)
             }
+            return true
         }
         runtimeConfig.confirm_read_clipboard_cb = { userdata, content, state, _ in
             guard let userdata, let content else { return }

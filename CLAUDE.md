@@ -19,8 +19,13 @@ xcodebuild -project GhosttyTabs.xcodeproj -scheme cter -configuration Debug -des
 When rebuilding GhosttyKit.xcframework, always use Release optimizations:
 
 ```bash
-cd ghostty && zig build -Demit-xcframework=true -Doptimize=ReleaseFast
+cd ghostty && zig build -Demit-xcframework=true -Demit-macos-app=false -Doptimize=ReleaseFast
 ```
+
+Requires the zig version in `ghostty/build.zig.zon` (`minimum_zig_version`, currently 0.16.0)
+first in `PATH`; Ghostty's external translate-c step runs the `zig` found on `PATH`. After bumping
+the submodule, copy `ghostty/include/ghostty.h` over the root `ghostty.h` (the bridging header imports
+the root copy).
 
 ## Tests
 
