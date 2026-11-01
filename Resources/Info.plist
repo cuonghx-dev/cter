@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	Merged with the generated Info.plist (GENERATE_INFOPLIST_FILE = YES).
+	In-app drag types must be declared here: an undeclared identifier makes
+	UTType(identifier) return nil, so SwiftUI's DropInfo.hasItemsConforming(to:)
+	never matches and every DropDelegate rejects the drag.
+	-->
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.cuonghx.cter.sidebar-tab</string>
+			<key>UTTypeDescription</key>
+			<string>cter Sidebar Tab</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.cuonghx.cter.pane-surface</string>
+			<key>UTTypeDescription</key>
+			<string>cter Pane Tab</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

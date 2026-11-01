@@ -656,7 +656,7 @@ private struct NewTabDropDelegate: DropDelegate {
     let onDrop: () -> Void
 
     func validateDrop(info: DropInfo) -> Bool {
-        info.hasItemsConforming(to: [.cterPaneSurface])
+        SurfaceDragState.shared.accepts(info)
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
@@ -1248,10 +1248,12 @@ struct TabItemView: View {
 }
 
 /// Private, process-only drag types. Using these instead of plain text means a dragged tab
-/// dropped onto a terminal (or another app) never pastes its UUID.
+/// dropped onto a terminal (or another app) never pastes its UUID. Both are declared under
+/// `UTExportedTypeDeclarations` in Resources/Info.plist; without that, `UTType(identifier)`
+/// returns nil and `DropInfo.hasItemsConforming(to:)` never matches.
 extension UTType {
-    static let cterSidebarTab = UTType(importedAs: "com.cuonghx.cter.sidebar-tab")
-    static let cterPaneSurface = UTType(importedAs: "com.cuonghx.cter.pane-surface")
+    static let cterSidebarTab = UTType(exportedAs: "com.cuonghx.cter.sidebar-tab", conformingTo: .data)
+    static let cterPaneSurface = UTType(exportedAs: "com.cuonghx.cter.pane-surface", conformingTo: .data)
 }
 
 extension NSItemProvider {
@@ -1296,7 +1298,7 @@ private struct SidebarTabDropDelegate: DropDelegate {
     }
 
     func validateDrop(info: DropInfo) -> Bool {
-        draggingTabId != nil || info.hasItemsConforming(to: [.cterPaneSurface])
+        draggingTabId != nil || SurfaceDragState.shared.accepts(info)
     }
 
     func dropEntered(info: DropInfo) {

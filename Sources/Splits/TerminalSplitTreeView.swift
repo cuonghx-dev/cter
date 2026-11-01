@@ -250,6 +250,12 @@ final class SurfaceDragState: ObservableObject {
             .loadCterDragItem(type: .cterPaneSurface, completion: completion)
     }
 
+    /// Whether `info` carries a pane tab. The live drag state answers synchronously; the
+    /// pasteboard check covers a drag whose state was already cleared.
+    func accepts(_ info: DropInfo) -> Bool {
+        surfaceId != nil || info.hasItemsConforming(to: [.cterPaneSurface])
+    }
+
     /// Whether a drop is meaningful; optimistic when the dragged id isn't known yet.
     func allows(_ destination: SurfaceDropDestination) -> Bool {
         guard let surfaceId else { return true }
@@ -301,7 +307,7 @@ private struct PaneSurfaceDropDelegate: DropDelegate {
     private var dragState: SurfaceDragState { .shared }
 
     func validateDrop(info: DropInfo) -> Bool {
-        info.hasItemsConforming(to: [.cterPaneSurface])
+        dragState.accepts(info)
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
@@ -378,7 +384,7 @@ private struct PaneTabDropDelegate: DropDelegate {
     }
 
     func validateDrop(info: DropInfo) -> Bool {
-        info.hasItemsConforming(to: [.cterPaneSurface])
+        dragState.accepts(info)
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
